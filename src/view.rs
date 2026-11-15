@@ -4,9 +4,10 @@ use crate::{
     model::{App, BACKGROUNDS, Input, InputMode},
     renderer::{Color, Draw, TextStyle, WHITE},
     state::{
-        APPS_COLUMNS, APPS_SECTION, Control, HOME_FADE_LEFT, HOME_FADE_RIGHT, HOME_STRIP_LEFT,
-        HOME_STRIP_RIGHT, HOME_TILE_PITCH, HOME_TILE_WIDTH, KEYS, Overlay, Page, Rect,
-        SYSTEM_SECTION, State, Subpage, Target, TextField, WIDGETS_SECTION,
+        APPS_COLUMNS, APPS_SECTION, CHANNEL_TILE_PITCH, CHANNEL_TILE_WIDTH, Control,
+        HOME_FADE_LEFT, HOME_FADE_RIGHT, HOME_STRIP_LEFT, HOME_STRIP_RIGHT, HOME_TILE_PITCH,
+        HOME_TILE_WIDTH, KEYS, Overlay, Page, Rect, SYSTEM_SECTION, State, Subpage, Target,
+        TextField, WIDGETS_SECTION,
     },
     weather::{self, Unit},
 };
@@ -20,16 +21,19 @@ const MAIN_TOP: f32 = 108.8;
 const FACE_HEIGHT: f32 = 154.4;
 const GRID_PITCH: f32 = 296.4;
 const RECENTS_BACKDROP_OPACITY: f32 = 0.86;
+const COMPANION_BACKGROUND: u32 = 0x1b2023;
 
 fn input_icon_width(name: &str, size: f32) -> f32 {
     size * match name {
         "input-sony" => 5. / 3.,
-        "input-apple-tv" | "input-dvd" | "input-blu-ray" | "input-disk" => 4. / 3.,
+        "input-apple-tv" | "input-dvd" | "input-blu-ray" => 4. / 3.,
         "input-playstation" => 7. / 6.,
         _ => 1.,
     }
 }
 
+#[path = "channel-switcher-view.rs"]
+mod channel_switcher_view;
 #[path = "recents-view.rs"]
 mod recents_view;
 
@@ -194,6 +198,14 @@ impl Scene {
     fn glass(&mut self, rect: Rect, radius: f32) {
         self.draw.push(Draw::Glass(rect, radius, c(0x202020, 0.96)));
     }
+    fn modal_surface(&mut self, rect: Rect, radius: f32) {
+        self.draw.push(Draw::RoundedGradient(
+            rect,
+            radius,
+            c(0x34383b, 1.),
+            c(0x24282d, 1.),
+        ));
+    }
     fn new() -> Self {
         Self {
             draw: Vec::new(),
@@ -353,7 +365,7 @@ fn companion(
     let panel = Rect::new(520., 144., 880., 816.);
     out.modal = Some(panel);
     out.shadow(panel, 24., 40., 12., 0.3);
-    out.glass(panel, 24.);
+    out.shape(panel, 24., c(COMPANION_BACKGROUND, 1.));
     out.text(
         language.t(strings.title),
         Rect::new(584., 198., 752., 48.),
@@ -376,7 +388,7 @@ fn companion(
             let y = 310.;
             // Invert the normal QR polarity to blend into the dark modal, while
             // retaining a high-contrast foreground and the full quiet zone.
-            let background = c(0x1b2023, 1.);
+            let background = c(COMPANION_BACKGROUND, 1.);
             let modules = c(0xf5f4ef, 1.);
             out.shape(Rect::new(x, y, size, size), 0., background);
             for row in 0..session.qr_size {
@@ -504,6 +516,11 @@ pub fn recents_replaces_page(state: &State) -> bool {
     state.recents_open() && state.recents.visibility == 1.
 }
 
+/// Fully shown channel switcher replaces the page like Recents.
+pub fn channel_switcher_replaces_page(state: &State) -> bool {
+    state.channel_switcher_open() && state.channel_switcher.visibility == 1.
+}
+
 pub fn scene(state: &State, assets: &Assets, now: OffsetDateTime) -> Scene {
     let mut out = Scene::new();
     if let Some((previous, start)) = &state.previous_background {
@@ -537,6 +554,18 @@ pub fn scene(state: &State, assets: &Assets, now: OffsetDateTime) -> Scene {
             c(0x080b12, RECENTS_BACKDROP_OPACITY),
         );
         recents_view::render(&mut out, state, assets);
+        if let Some((notice, _)) = &state.notice {
+            toast(&mut out, state, assets, notice);
+        }
+        return out;
+    }
+    if channel_switcher_replaces_page(state) {
+        out.shape(
+            Rect::new(0., 0., 1920., 1080.),
+            0.,
+            c(0x080b12, RECENTS_BACKDROP_OPACITY),
+        );
+        channel_switcher_view::render(&mut out, state, assets);
         if let Some((notice, _)) = &state.notice {
             toast(&mut out, state, assets, notice);
         }
@@ -639,6 +668,7 @@ pub fn scene(state: &State, assets: &Assets, now: OffsetDateTime) -> Scene {
             Overlay::TileEditor => tile_editor(&mut out, state, assets),
             Overlay::SystemKeyboard
             | Overlay::Recents { .. }
+            | Overlay::ChannelSwitcher { .. }
             | Overlay::Inputs
             | Overlay::Settings => {}
         }
@@ -676,6 +706,29 @@ pub fn scene(state: &State, assets: &Assets, now: OffsetDateTime) -> Scene {
         let moved: Vec<_> = out.draw.drain(start..start + fills).collect();
         out.draw.splice(content_start..content_start, moved);
         if !state.recents_open() {
+            out.controls = parent_controls;
+            out.modal = parent_modal;
+        }
+    }
+    if state.channel_switcher_open() || state.channel_switcher.visibility > 0. {
+        let parent_controls = std::mem::take(&mut out.controls);
+        let parent_modal = out.modal;
+        out.fade(content_start, 1. - state.channel_switcher.visibility, 1.);
+        let start = out.draw.len();
+        out.shape(
+            Rect::new(0., 0., 1920., 1080.),
+            0.,
+            c(0x080b12, RECENTS_BACKDROP_OPACITY),
+        );
+        channel_switcher_view::render(&mut out, state, assets);
+        out.fade(start, state.channel_switcher.visibility, 1.);
+        let fills = out.draw[start..]
+            .iter()
+            .take_while(|draw| full_screen_fill(draw))
+            .count();
+        let moved: Vec<_> = out.draw.drain(start..start + fills).collect();
+        out.draw.splice(content_start..content_start, moved);
+        if !state.channel_switcher_open() {
             out.controls = parent_controls;
             out.modal = parent_modal;
         }
@@ -752,14 +805,7 @@ fn header(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) 
             out.shape(
                 Rect::new(x + 34. + icon_width + label_width, 76., 8., 8.),
                 4.,
-                c(
-                    if input.connected == Some(true) {
-                        0x60e6a0
-                    } else {
-                        0x8c949c
-                    },
-                    (progress - 0.55) / 0.45,
-                ),
+                c(input_status_color(input), (progress - 0.55) / 0.45),
             );
         }
         out.control(target, rect, false);
@@ -850,7 +896,7 @@ fn corner_menu(out: &mut Scene, state: &State, assets: &Assets) {
                         .input_icon(&input.id)
                         .unwrap_or_else(|| input_icon(input, state.preferences.input_name(input)))
                 ),
-                input.connected,
+                input_status_color(input),
             )
         })
         .collect();
@@ -874,7 +920,7 @@ fn corner_menu(out: &mut Scene, state: &State, assets: &Assets) {
             true,
         );
     }
-    for (index, (target, label, icon, connected)) in entries.into_iter().enumerate() {
+    for (index, (target, label, icon, status_color)) in entries.into_iter().enumerate() {
         let rect = Rect::new(
             panel.x + 12.,
             panel.y + 12. + index as f32 * 76.,
@@ -902,14 +948,7 @@ fn corner_menu(out: &mut Scene, state: &State, assets: &Assets) {
         out.shape(
             Rect::new(rect.x + rect.w - 28., rect.y + 29., 10., 10.),
             5.,
-            c(
-                if connected == Some(true) {
-                    0x60e6a0
-                } else {
-                    0x8c949c
-                },
-                1.,
-            ),
+            c(status_color, 1.),
         );
         out.control(target, rect, false);
     }
@@ -1187,7 +1226,90 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, _now: OffsetDateTime) {
         out.fade(start, state.drawer_progress(), 1.);
         out.controls.truncate(controls);
     }
+    if !state.home_channels().is_empty() {
+        let start = out.draw.len();
+        channels_strip(out, state, assets);
+        out.fade(start, 1. - state.drawer_progress(), 1.);
+    }
     favorites_dock(out, state, assets);
+}
+
+fn channels_strip(out: &mut Scene, state: &State, assets: &Assets) {
+    let language = state.preferences.language;
+    let channels = state.home_channels();
+    let y = state.dock_y() - 196.;
+    out.text(
+        language.t("channels"),
+        Rect::new(HOME_STRIP_LEFT, y - 36., 600., 28.),
+        text(18., 550, -0.01).leading(1.2),
+        c(0xffffff, 0.72),
+        false,
+    );
+    let tile_h = 120.;
+    out.draw.push(Draw::Clip(Some(Rect::new(
+        HOME_STRIP_LEFT - 8.,
+        y - 4.,
+        HOME_STRIP_RIGHT - HOME_STRIP_LEFT + 16.,
+        tile_h + 8.,
+    ))));
+    for (index, channel) in channels.iter().enumerate() {
+        let x = HOME_STRIP_LEFT + index as f32 * CHANNEL_TILE_PITCH - state.channel_scroll;
+        let rect = Rect::new(x, y, CHANNEL_TILE_WIDTH, tile_h);
+        let target = Target::Channel(channel.id.clone());
+        let focused = state.focus == target;
+        out.control(target.clone(), rect, false);
+        out.shadow(rect, 18., 20., 8., if focused { 0.28 } else { 0.16 });
+        out.glass(rect, 18.);
+        if focused {
+            out.shape(rect.inset(-3.), 20., c(0xffffff, 0.22));
+        }
+        if let Some(source) = &channel.icon
+            && let Some(art) = assets.artwork.get(source)
+        {
+            // Same GPU path as installed app icons: `Draw::Image` only loads filesystem paths.
+            let face = rect.inset(14.);
+            out.draw
+                .push(Draw::AppImage(art, face, 12., [1., 1., 1., 1.]));
+        } else {
+            let number = if channel.number.is_empty() {
+                "·"
+            } else {
+                &channel.number
+            };
+            out.text(
+                number,
+                Rect::new(rect.x + 12., rect.y + 22., rect.w - 24., 44.),
+                text(28., 650, -0.03),
+                WHITE,
+                true,
+            );
+            out.text(
+                &channel.name,
+                Rect::new(rect.x + 10., rect.y + 70., rect.w - 20., 36.),
+                text(13.5, 500, -0.01).leading(1.15),
+                c(0xffffff, 0.78),
+                true,
+            );
+        }
+    }
+    out.draw.push(Draw::Clip(Some(state.content_viewport())));
+    if let Target::Channel(id) = &state.focus
+        && let Some(channel) = channels.iter().find(|channel| &channel.id == id)
+    {
+        let label = channel
+            .program
+            .as_ref()
+            .map(|program| program.title.as_str())
+            .filter(|title| !title.is_empty())
+            .unwrap_or(channel.name.as_str());
+        out.text(
+            label,
+            Rect::new(HOME_STRIP_LEFT, y + tile_h + 10., 1200., 28.),
+            text(16., 500, -0.01).leading(1.2),
+            c(0xffffff, 0.86),
+            false,
+        );
+    }
 }
 
 fn favorites_dock(out: &mut Scene, state: &State, assets: &Assets) {
@@ -1272,10 +1394,43 @@ struct WeatherSummary {
     width: f32,
     icon: String,
     icon_rect: Rect,
+    show_icon: bool,
     parts: Vec<(String, TextStyle, Color, Rect)>,
 }
 fn weather_summary_layout(state: &State, assets: &Assets) -> WeatherSummary {
+    weather_summary_layout_for(state, assets, state.preferences.weather_style, false)
+}
+
+fn weather_summary_layout_for(
+    state: &State,
+    assets: &Assets,
+    style: crate::model::WeatherStyle,
+    preview: bool,
+) -> WeatherSummary {
+    use crate::model::WeatherStyle;
     let language = state.preferences.language;
+    // Settings previews are deliberately offline samples, even before a location is configured.
+    let sample = weather::Location {
+        name: "Vienna".into(),
+        region: String::new(),
+        country: String::new(),
+        latitude: 48.2085,
+        longitude: 16.3721,
+    };
+    let place = if preview {
+        Some(&sample)
+    } else {
+        state.preferences.weather_location.as_ref()
+    };
+    let reading = if preview {
+        Some(weather::Reading {
+            temperature: 14.2,
+            code: 2,
+            is_day: true,
+        })
+    } else {
+        place.and_then(|place| state.weather.reading(place))
+    };
     let mut parts = Vec::new();
     let mut add = |label: String, style: TextStyle, x: f32, y: f32, width: f32, opacity: f32| {
         let (label, style) = assets.fit_line(&label, style, width, 24.);
@@ -1288,7 +1443,7 @@ fn weather_summary_layout(state: &State, assets: &Assets) -> WeatherSummary {
         parts.push((label, style, c(0xf5f5f5, opacity), rect));
     };
     let mut icon = "weather/partly-cloudy.png".to_owned();
-    if let Some(place) = &state.preferences.weather_location {
+    if let Some(place) = place {
         add(
             place.name.clone(),
             text(30., 550, -0.02),
@@ -1297,7 +1452,7 @@ fn weather_summary_layout(state: &State, assets: &Assets) -> WeatherSummary {
             860.,
             0.85,
         );
-        if let Some(reading) = state.weather.reading(place) {
+        if let Some(reading) = reading {
             let condition = weather::condition(reading);
             icon = format!("weather/{}.png", condition.icon);
             add(
@@ -1319,7 +1474,7 @@ fn weather_summary_layout(state: &State, assets: &Assets) -> WeatherSummary {
                 760.,
                 0.78,
             );
-            if state.weather.failed {
+            if state.weather.failed && !preview {
                 add(
                     language.t("lastReading").into(),
                     text(24., 400, 0.),
@@ -1362,16 +1517,85 @@ fn weather_summary_layout(state: &State, assets: &Assets) -> WeatherSummary {
             0.92,
         );
     }
+    let mut icon_rect = Rect::new(84., 64., 144., 144.);
+    let mut height = 268.;
+    if style == WeatherStyle::NoIcon {
+        for (_, _, _, rect) in parts.iter_mut().skip(1) {
+            rect.x = 84.;
+        }
+    } else if style == WeatherStyle::Compact {
+        icon_rect = Rect::new(84., 116., 32., 32.);
+        if reading.is_some() {
+            let city = parts.remove(0).0;
+            let temperature = &mut parts[0];
+            temperature.1 = text(88., 500, -0.055);
+            temperature.3 = Rect::new(
+                84.,
+                0.,
+                assets.width(&temperature.0, temperature.1) + 2.,
+                106.,
+            );
+            let condition = &mut parts[1];
+            let label = format!("{} · {city}", condition.0);
+            let (label, font) = assets.fit_line(&label, text(26., 450, -0.02), 800., 24.);
+            condition.0 = label;
+            condition.1 = font;
+            condition.3 = Rect::new(128., 116., assets.width(&condition.0, font) + 2., 36.);
+            if let Some((_, _, _, rect)) = parts.get_mut(2) {
+                rect.x = 84.;
+                rect.y = 168.;
+            }
+            height = if parts.len() > 2 { 212. } else { 164. };
+        } else {
+            icon_rect.y = 90.;
+            if let Some((_, _, _, rect)) = parts.get_mut(1) {
+                rect.x = 128.;
+            }
+            height = 168.;
+        }
+    }
     let right = parts
         .iter()
         .map(|(_, _, _, rect)| rect.x + rect.w)
         .fold(228., f32::max);
     WeatherSummary {
-        height: 268.,
+        height,
         width: right - 84.,
         icon,
-        icon_rect: Rect::new(84., 64., 144., 144.),
+        icon_rect,
+        show_icon: style != WeatherStyle::NoIcon,
         parts,
+    }
+}
+
+fn paint_weather_summary(
+    out: &mut Scene,
+    assets: &Assets,
+    summary: &WeatherSummary,
+    x: f32,
+    y: f32,
+    scale: f32,
+) {
+    let transform = |rect: Rect| {
+        Rect::new(
+            x + rect.x * scale,
+            y + rect.y * scale,
+            rect.w * scale,
+            rect.h * scale,
+        )
+    };
+    if summary.show_icon {
+        out.image(
+            assets.path(&summary.icon),
+            transform(summary.icon_rect),
+            0.,
+            true,
+        );
+    }
+    for (label, style, color, rect) in &summary.parts {
+        let mut style = *style;
+        style.size *= scale;
+        out.text(label.clone(), transform(*rect), style, *color, false);
     }
 }
 fn weather_summary(
@@ -1393,26 +1617,7 @@ fn weather_summary(
             (rect.h - leading).max(style.size),
         )
     });
-    let icon_rect = Rect::new(
-        summary.icon_rect.x,
-        y + summary.icon_rect.y,
-        summary.icon_rect.w,
-        summary.icon_rect.h,
-    );
-    if summary.icon.ends_with(".png") {
-        out.image(assets.path(&summary.icon), icon_rect, 0., true);
-    } else {
-        out.icon(assets, &summary.icon, icon_rect, c(0xdedede, 0.83));
-    }
-    for (label, style, color, rect) in summary.parts {
-        out.text(
-            label,
-            Rect::new(rect.x, rect.y + y, rect.w, rect.h),
-            style,
-            color,
-            false,
-        );
-    }
+    paint_weather_summary(out, assets, &summary, 0., y, 1.);
     if state.preferences.weather_location.is_none() {
         let rect = Rect::new(84., y, summary.width, summary.height);
         if state.focus == Target::WeatherConfigure
@@ -1747,6 +1952,69 @@ fn weather_settings(out: &mut Scene, state: &State, assets: &Assets) {
             chevron: true,
         },
     );
+    row(
+        out,
+        state,
+        assets,
+        Row {
+            target: Target::WeatherStyle,
+            rect: Rect::new(640., y + 84., 1120., 72.),
+            title: language.t("weatherStyle"),
+            icon: Some("grid"),
+            value: Some(language.t(state.preferences.weather_style.label_key())),
+            description: None,
+            selected: false,
+            chevron: true,
+        },
+    );
+}
+
+fn weather_style_settings(out: &mut Scene, state: &State, assets: &Assets) {
+    let language = state.preferences.language;
+    for (index, style) in crate::model::WeatherStyle::ALL.into_iter().enumerate() {
+        let rect = Rect::new(
+            640.,
+            164.8 + index as f32 * 248. - state.scroll,
+            1120.,
+            232.,
+        );
+        row(
+            out,
+            state,
+            assets,
+            Row {
+                target: Target::Choice(index),
+                rect,
+                title: language.t(style.label_key()),
+                icon: None,
+                value: None,
+                description: None,
+                selected: false,
+                chevron: false,
+            },
+        );
+        // A dark inset keeps the real weather treatment readable on the white focus surface.
+        let preview = Rect::new(1040., rect.y + 12., 700., 208.);
+        out.shape(preview, 16., c(0x192129, 1.));
+        let summary = weather_summary_layout_for(state, assets, style, true);
+        let scale = 0.58_f32.min((preview.w - 64.) / summary.width);
+        paint_weather_summary(
+            out,
+            assets,
+            &summary,
+            preview.x + 32. - 84. * scale,
+            preview.y + (preview.h - summary.height * scale) / 2.,
+            scale,
+        );
+        if style == state.preferences.weather_style {
+            out.icon(
+                assets,
+                "check",
+                Rect::new(1696., rect.y + 24., 24., 24.),
+                WHITE,
+            );
+        }
+    }
 }
 
 fn location_settings(out: &mut Scene, state: &State, assets: &Assets) {
@@ -1922,14 +2190,18 @@ fn settings_sidebar(out: &mut Scene, state: &State, assets: &Assets) {
                 Some(Subpage::TimeFormat) => {
                     Some(vec![language.t("clock"), language.t("timeFormat")])
                 }
-                Some(Subpage::WeatherLocation | Subpage::Temperature) => Some(vec![
-                    language.t("weather"),
-                    language.t(if state.subpage == Some(Subpage::WeatherLocation) {
-                        "location"
-                    } else {
-                        "temperature"
-                    }),
-                ]),
+                Some(Subpage::WeatherLocation | Subpage::Temperature | Subpage::WeatherStyle) => {
+                    Some(vec![
+                        language.t("weather"),
+                        language.t(if state.subpage == Some(Subpage::WeatherLocation) {
+                            "location"
+                        } else if state.subpage == Some(Subpage::Temperature) {
+                            "temperature"
+                        } else {
+                            "weatherStyle"
+                        }),
+                    ])
+                }
                 Some(Subpage::InputIcons(_)) => {
                     Some(vec![language.t("inputs"), language.t("inputIcon")])
                 }
@@ -1952,8 +2224,10 @@ fn settings_sidebar(out: &mut Scene, state: &State, assets: &Assets) {
                 Some(Subpage::Weather) => language.t("weather"),
                 Some(Subpage::Shortcuts) => language.t("shortcuts"),
                 Some(Subpage::Inputs) => language.t("inputs"),
+                Some(Subpage::Channels) => language.t("channels"),
                 Some(Subpage::Clock) => language.t("clock"),
                 Some(Subpage::Language) => language.t("language"),
+                Some(Subpage::AppSorting) => language.t("appSorting"),
                 Some(Subpage::TextRendering) => language.t("textRendering"),
                 _ => "",
             };
@@ -2029,8 +2303,10 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
             subpage,
             Subpage::WeatherLocation
                 | Subpage::Weather
+                | Subpage::WeatherStyle
                 | Subpage::Shortcuts
                 | Subpage::Inputs
+                | Subpage::Channels
                 | Subpage::Greeting
                 | Subpage::Date
                 | Subpage::Clock
@@ -2038,8 +2314,10 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
             match subpage {
                 Subpage::WeatherLocation => location_settings(out, state, assets),
                 Subpage::Weather => weather_settings(out, state, assets),
+                Subpage::WeatherStyle => weather_style_settings(out, state, assets),
                 Subpage::Shortcuts => shortcut_settings(out, state, assets),
                 Subpage::Inputs => inputs_settings(out, state, assets),
+                Subpage::Channels => channels_settings(out, state, assets),
                 Subpage::Greeting => greeting_settings(out, state, assets),
                 Subpage::Date => date_settings(out, state, assets),
                 Subpage::Clock => clock_settings(out, state, assets),
@@ -2118,8 +2396,10 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
             ],
             Subpage::WeatherLocation
             | Subpage::Weather
+            | Subpage::WeatherStyle
             | Subpage::Shortcuts
             | Subpage::Inputs
+            | Subpage::Channels
             | Subpage::Greeting
             | Subpage::Date
             | Subpage::Clock => {
@@ -2128,6 +2408,16 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
             Subpage::Language => Language::ALL
                 .into_iter()
                 .map(|option| (option.name(), None, option == language))
+                .collect(),
+            Subpage::AppSorting => crate::model::AppSorting::ALL
+                .into_iter()
+                .map(|mode| {
+                    (
+                        language.t(mode.label_key()),
+                        None,
+                        mode == state.preferences.app_sorting,
+                    )
+                })
                 .collect(),
             Subpage::TextRendering => crate::text_rendering::TextRendering::ALL
                 .into_iter()
@@ -2196,6 +2486,13 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                 (1, "clock", "clock", None, true),
                 (4, "language", "language", Some(language.name()), true),
                 (
+                    10,
+                    "appSorting",
+                    "arrow-up-down",
+                    Some(language.t(state.preferences.app_sorting.label_key())),
+                    true,
+                ),
+                (
                     2,
                     "reducedMotion",
                     "motion",
@@ -2204,6 +2501,17 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                     } else {
                         language.t("stateOff")
                     }),
+                    false,
+                ),
+                (
+                    11,
+                    "uiSounds",
+                    "volume",
+                    Some(language.t(if state.preferences.ui_sounds {
+                        "stateOn"
+                    } else {
+                        "stateOff"
+                    })),
                     false,
                 ),
             ]
@@ -2357,6 +2665,7 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                 (1, "weather", "weather-sun"),
                 (2, "shortcuts", "sparkles"),
                 (3, "inputs", "input-hdmi"),
+                (5, "channels", "tv"),
             ]
             .into_iter()
             .enumerate()
@@ -2490,6 +2799,87 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
         }
         _ => {}
     }
+}
+
+fn channels_settings(out: &mut Scene, state: &State, assets: &Assets) {
+    let language = state.preferences.language;
+    let s = state.scroll;
+    row(
+        out,
+        state,
+        assets,
+        Row {
+            target: Target::ChannelsToggle,
+            rect: Rect::new(640., 164.8 - s, 1120., 72.),
+            title: language.t("showWidget"),
+            icon: Some("eye"),
+            value: Some(language.t(if state.preferences.show_channels {
+                "stateOn"
+            } else {
+                "stateOff"
+            })),
+            description: None,
+            selected: false,
+            chevron: false,
+        },
+    );
+    let ordered = state.channels_settings_list();
+    for (index, channel) in ordered.iter().enumerate() {
+        let on_home = state.preferences.channel_on_home(&channel.id);
+        let title = if channel.number.is_empty() {
+            channel.name.clone()
+        } else {
+            format!("{} · {}", channel.number, channel.name)
+        };
+        row(
+            out,
+            state,
+            assets,
+            Row {
+                target: Target::ChannelFavorite(channel.id.clone()),
+                rect: Rect::new(640., 248.8 + index as f32 * 84. - s, 1120., 72.),
+                title: &title,
+                icon: Some(if channel.radio { "generic" } else { "tv" }),
+                value: Some(language.t(if on_home { "stateOn" } else { "stateOff" })),
+                description: channel
+                    .program
+                    .as_ref()
+                    .map(|program| program.title.as_str()),
+                selected: on_home,
+                chevron: false,
+            },
+        );
+    }
+    let mut y = 248.8 + ordered.len() as f32 * 84. + 16. - s;
+    if ordered.is_empty() {
+        out.text(
+            language.t("noChannels"),
+            Rect::new(664., 249. - s, 1000., 26.),
+            text(16.8, 400, 0.).leading(1.5),
+            c(0xf5f5f5, 0.72),
+            false,
+        );
+        y += 36.;
+    }
+    row(
+        out,
+        state,
+        assets,
+        Row {
+            target: Target::Setting(6),
+            rect: Rect::new(640., y, 1120., 72.),
+            title: if state.loading {
+                language.t("refreshNotice")
+            } else {
+                language.t("refreshChannels")
+            },
+            icon: Some("refresh"),
+            value: None,
+            description: None,
+            selected: false,
+            chevron: false,
+        },
+    );
 }
 
 fn inputs_settings(out: &mut Scene, state: &State, assets: &Assets) {
@@ -2928,6 +3318,14 @@ fn device_icon(name: &str) -> &'static str {
         "hdmi"
     }
 }
+fn input_status_color(input: &Input) -> u32 {
+    match (input.connected, input.signal) {
+        (Some(true), Some(false)) => 0xf5b84b,
+        (Some(true), _) => 0x60e6a0,
+        _ => 0x8c949c,
+    }
+}
+
 /// Detail under an input title: the TV's own label (when connected and not just
 /// the port), the port when a custom name replaces it, then the status.
 pub fn input_status(input: &Input, renamed: bool, language: Language) -> String {
@@ -3083,7 +3481,7 @@ fn options(out: &mut Scene, state: &State, assets: &Assets, id: &str, anchor: Op
     let panel_start = out.draw.len();
     out.modal = Some(panel);
     out.shadow(panel, 27.2, 120., 25., 0.47);
-    out.glass(panel, 27.2);
+    out.modal_surface(panel, 27.2);
     out.border(panel, 27.2, 1., c(0xffffff, 0.12));
     let hidden = state.preferences.hidden.iter().any(|item| item == id);
     let actions = if shortcut {
@@ -3243,7 +3641,7 @@ fn delete_confirmation(out: &mut Scene, state: &State, assets: &Assets, id: &str
     let panel = Rect::new(640., (1080. - height) / 2., 640., height);
     out.modal = Some(panel);
     out.shadow(panel, 28., 100., 24., 0.47);
-    out.glass(panel, 28.);
+    out.modal_surface(panel, 28.);
     out.border(panel, 28., 1., c(0xffffff, 0.12));
     out.text(
         body,
@@ -3314,7 +3712,7 @@ fn keyboard(out: &mut Scene, state: &State, assets: &Assets) {
     let panel = Rect::new(350., 290., 1220., 530.);
     out.modal = Some(panel);
     out.shadow(panel, 27.2, 90., 20., 0.45);
-    out.glass(panel, 27.2);
+    out.modal_surface(panel, 27.2);
     out.border(panel, 27.2, 1., c(0xffffff, 0.12));
     out.text(
         match state.keyboard_field {

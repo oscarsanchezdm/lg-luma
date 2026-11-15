@@ -72,6 +72,29 @@ backend. Avoid copying the whole SDK library directory or the TV's graphics driv
 
 ## Controls and navigation
 
+### Startup profiling
+
+See [startup measurements](docs/startup.md) for the Liquid Glass startup regression and
+the benchmark procedure. `xvfb-run -a pnpm benchmark:startup` builds a release desktop
+binary and alternates five process starts with runtime-filtered and precomputed glass.
+It records `.build/startup-benchmark.json`, without contacting TV or public HTTP services.
+Use `LUMA_STARTUP_RUNS=10` to change the sample count. These are process starts with warm
+filesystem/driver caches, not TV cold-boot measurements.
+
+`--diagnostics PATH` includes `startup.stages_ms` and `startup.first_frame`, separate from
+steady-state frame pacing. The glass counters distinguish prepared atlas loads from legacy
+runtime filtering. TV startup logs also report this breakdown after the first presentation.
+Inventory completion and the first successfully populated frame are timed separately, so a
+quick loading frame cannot conceal slow TV inventory responses.
+`LUMA_GLASS_PRECOMPUTED=0` forces the original filtering path for diagnostic comparison.
+
+`pnpm assets` prepares lossless `wallpapers/*.glass.png` atlases from the final 1080p JPEGs,
+including unshaded variants. The host and legacy renderer share the exact Rust resize/blur
+implementation. New uploads prepare both atlases on the wallpaper worker before publishing
+the immutable directory. Older uploads or missing/corrupt atlases fall back to the original
+renderer. Shader sampling, glass appearance, GPU cache budgets and lazy text are unchanged.
+`xvfb-run -a pnpm test:startup` verifies desktop GL/GLES framebuffer equality and fallback.
+
 ### Documentation screenshots
 
 `pnpm screenshots` generates `docs/home.png`, `docs/apps.png`, `docs/settings.png` and
@@ -87,17 +110,48 @@ It does not execute the test suites. A desktop display is required; on headless 
 
 ### Input
 
-| Input                         | Action                                                                       |
-| ----------------------------- | ---------------------------------------------------------------------------- |
-| Arrows                        | Move focus. Down from favorites opens the drawer, Up reaches corner controls |
-| OK / Enter                    | Activate on release                                                          |
-| Hold OK for 600 ms            | Reorder Home favorite or open app options                                    |
-| OK or Back in move mode       | Finish reordering without launching                                          |
-| Escape / Back / Backspace     | Parent navigation, overlay dismissal or Recent apps from Home                |
-| Hold Back / Escape for 600 ms | Open Recent apps while Luma is focused                                       |
-| Menu / M / right-click        | App or background options side popup                                         |
-| Pointer / wheel               | Hover, click, hold and scrolling                                             |
-| F5                            | Refresh inventory                                                            |
+General → UI sounds stores `ui_sounds` (default `false`, also for existing preferences).
+The SDL queue opens lazily on the first audible interaction, plays short original synthesized
+navigation/select/back cues at a fixed quiet level, and closes when disabled or the window loses
+focus/visibility. Navigation repeats are rate-limited and queued audio cannot accumulate.
+Unchanged navigation, worker responses, redraws, and scripted captures stay silent. Audio errors
+are logged once per enabled session and never prevent navigation; toggling off/on retries.
+No sound recordings or extra audio libraries are packaged. TV routing/volume and behavior alongside
+other apps need manual hardware verification. A desktop-only backend check is available with
+`SDL_AUDIODRIVER=dummy cargo test --locked --bin luma dummy_audio_ -- --ignored --test-threads=1`.
+The unavailable-backend check runs with
+`SDL_AUDIODRIVER=luma-unavailable cargo test --locked --bin luma unavailable_audio_ -- --ignored --test-threads=1`.
+
+Weather → Widget style persists `weather_style` (`standard`, the default, `no_icon`,
+or `compact`). Home and Settings use the same native layout and painting functions.
+The picker shows all three designs with offline sample weather, in the saved
+temperature unit. Browsing does not change preferences or fetch a forecast. OK/click
+saves a style and returns to Weather, while Back/Left cancels without changing the style.
+The no-icon layout reclaims the icon column. Compact uses two lines, with a small icon,
+condition and location on the second. Cached-reading warnings and setup/error states
+remain visible. `xvfb-run -a pnpm screenshots --weather-styles` captures all designs and
+the settings preview using the native renderer and loopback-only cached sample weather.
+
+General → App sorting stores `app_sorting` (`alphabetical`, the default, or `usage`).
+`app_launch_counts` maps app IDs to saturating launch counts, saved after successful TV
+launch responses, including Recent apps. Failed launches, desktop simulations, inputs,
+and webhook shortcuts do not count. Counting continues in Alphabetically mode. Non-favorites sort
+by descending count in usage mode, then case-insensitive title and app ID. Favorites
+retain their manual order. The same order fills empty dock slots and the app drawer.
+`xvfb-run -a pnpm screenshots --sorting` captures the sorting settings, both app orders,
+and the generic disc input icon from the native desktop renderer using seeded local counts.
+
+| Input                         | Action                                                                           |
+| ----------------------------- | -------------------------------------------------------------------------------- |
+| Arrows                        | Move focus. Down from favorites opens the drawer, Up reaches corner controls     |
+| OK / Enter                    | Activate on release                                                              |
+| Hold OK for 600 ms            | Reorder Home favorite or open app options                                        |
+| OK or Back in move mode       | Finish reordering without launching                                              |
+| Escape / Back / Backspace     | Parent navigation, overlay dismissal, channel switcher, or Recent apps from Home |
+| Hold Back / Escape for 600 ms | Channel switcher when a Home channel is focused; otherwise Recent apps           |
+| Menu / M / right-click        | App or background options side popup                                             |
+| Pointer / wheel               | Hover, click, hold and scrolling                                                 |
+| F5                            | Refresh inventory                                                                |
 
 Backspace deletes while editing. Native Back uses SDL's webOS-specific keycode. Back dismisses
 the keyboard first; Weather Location then returns to its parent Location row, HDMI choices to
@@ -144,9 +198,16 @@ instead of once per minute. Existing saved hour and seconds preferences are reta
 App cards on Home, in the drawer, and in Settings → Apps are artwork-only, with no name captions
 or App names setting. Legacy `show_names`, `show_home_names`, and `show_app_names` preferences
 are ignored and are not written back. App titles remain available in the management popup.
-**Settings → Widgets** groups **Weather**, **Shortcuts**, and **Inputs** as separate subpages.
-Weather location and temperature choices return to Weather; Back from a widget returns to its row
-in Widgets. Input visibility/naming choices return to Inputs, then its Widgets row.
+**Settings → Widgets** groups **Weather**, **Shortcuts**, **Inputs**, and **Channels** as separate
+subpages. Weather location and temperature choices return to Weather; Back from a widget returns to
+its row in Widgets. Input visibility/naming choices return to Inputs, then its Widgets row. Channel
+favorites return to Channels, then its Widgets row. Channels can be shown or hidden from that
+subpage without clearing favorites; Left from the list or header restores the Channels Widgets
+row instead of jumping to the sidebar. The Home channels strip shows only selected
+tuner channels (logos from `/mnt/lg/cmn_data/channel_logo` when present); OK tunes via
+`apiadapter/tv/openChannel`. Guide titles prefer `getChannelProgramInfo` (now and next) and fall
+back to `getChannelCurrentProgramInfo`. Back (short or long-hold) on a focused Home channel opens a
+Recents-style switcher over Home favorites with logo and now/next text; OK tunes, Back/Up dismiss.
 Existing greeting, weather, shortcut and input preferences are unchanged. Scrollable Settings lists
 reserve 64 logical pixels below their last item for both remote focus and wheel scrolling,
 with a tighter 48-pixel spacing for Languages and Backgrounds.
@@ -160,6 +221,9 @@ is hidden. Enabled weather without a location uses the same large 144px artwork 
 Settings lists render behind fixed controls. The drawer grid is clipped below its fixed dock so
 offscreen cards cannot capture pointer events there. Input name removal uses **Clear name**.
 Choice checkmarks identify saved values, while the bright row fill identifies only the current focus.
+Input connection dots are amber when a connected cable explicitly reports no signal, green for
+other connected inputs, and gray for disconnected or unknown cable states. An unknown signal
+report alone does not imply no signal, and signal reports never override cable-based visibility.
 
 Input icon picker: **Settings → Widgets → Inputs → select input → Icon** opens a
 native picker for bundled input SVG icons. Its choices are **Automatic** (default label detection),
@@ -175,6 +239,8 @@ using Automatic. This is a backward-compatible feature and does not change input
 
 Home favorites form one horizontal glass dock, never a second row. Left/Right follows saved order,
 including reorder mode, and reveals complete cards. Up reaches Inputs or the clock/settings control.
+Up from the drawer’s first app row dismisses the drawer immediately while preserving the
+corresponding dock app as the selected Home favorite. Up within later grid rows stays in the drawer.
 Down lifts the dock to the top and reveals a six-column app grid beneath it. Favorites stay in the
 dock instead of appearing twice in the grid. The drawer has no search or category toolbar.
 The Home dock follows saved pinned order, with no Apps button or Move apps label above it.
@@ -213,6 +279,12 @@ an FBO or sampling the framebuffer. Text and app artwork are separate, sharp dra
 crossfades blend both glass backdrops. Wallpaper changes already invalidate the full scene, while
 ordinary glass changes participate in damage tracking.
 
+Modal cards (wallpaper upload, shortcut editing, app/background actions, deletion confirmations,
+and the keyboard) use opaque gray gradients rather than wallpaper-sampling glass to keep their
+content readable. The dock and regular controls retain their glass treatment.
+Wallpaper-upload and shortcut-editor panels use the same solid dark gray as the QR quiet zone
+and logo plate, avoiding a contrasting square behind the QR code without reducing its contrast.
+
 See [the research notes](docs/liquid-glass-research.md) for sources, visual decisions and limitations.
 
 For bounded GLES2 cost, refraction samples the wallpaper, not other UI controls behind a menu.
@@ -242,9 +314,12 @@ System text events update app/location queries; Done/Back stops editing and rest
 
 ### Recent apps
 
-Press Back on Home to open Recent apps, or hold Back (Escape on desktop) for 600 ms from any page.
-Short Back navigates on release. Back in an overlay, the system keyboard or
-move mode keeps its immediate dismissal behavior; Backspace keeps its editing/navigation role.
+Hold Back (Escape on desktop) for 600 ms from any page to open Recent apps (or the channel
+switcher when a Home channel tile is focused).
+Short Back navigates on release and does nothing on Home, except when a Home channel favorite
+is focused — then it opens the channel switcher. It never opens Recent apps.
+Back in an overlay, the system keyboard or move mode keeps its immediate dismissal behavior;
+Backspace keeps its editing/navigation role.
 Losing window focus cancels an unfinished hold. This is an app-local shortcut while Luma is focused.
 SDL-webOS Back (scancode 482) and long-Back Exit (505) are normalized before rust-sdl2 decodes the
 event, since the native keymap can leave their keycodes unset and the Rust scancode enum does not
@@ -705,7 +780,7 @@ failures preserve the last valid inputs. No failed inventory read substitutes de
 ### Optional native Home integration
 
 `tv/home.sh` and the native Rust `luma-helper` executable are packaged beside `luma`. They are a root-only, explicit integration
-for webOS 10/25 and 11/26 (and webOS 5/6 and 9/24, see below). `enable` stages a native manifest with ID `com.webos.app.home` and
+for webOS 10/25 and 11/26 (and webOS 5/6, 7/22 and 9/24, see below). `enable` stages a native manifest with ID `com.webos.app.home` and
 symlinks to the installed executable, libraries and assets under `/var/lib/luma-home/app`, then
 bind-mounts it over `/usr/palm/applications/com.webos.app.home`. SAM rereads that one app through
 `blockSystemApp` followed by `releaseBlockSystemApp`, including `forceBlockSystemApp: false` when
@@ -773,7 +848,7 @@ is bound to that executable path. Luma detects this (`platform::runs_as_lg_home`
 - skips the per-icon elevated-service fallback for installed artwork: as root every file is
   readable, so that fallback would only spend seconds per icon to fail the same way.
 
-`tv/home.sh` chooses this method (`"method": "executable"` in `state.json`) on webOS 5/6 and 24 (9.x) when LG
+`tv/home.sh` chooses this method (`"method": "executable"` in `state.json`) on webOS 5/6, 22 (7.x) and 24 (9.x) when LG
 Home's manifest is native, starts `file:///usr/bin/com.webos.app.home` and declares
 `nativeLifeCycleInterfaceVersion: 2`. `enable` and the boot hook bind-mount the installed
 executable over that path, stop the previous Home process and open Home if it was in front (or
@@ -788,6 +863,20 @@ shares `/var/run`, which is volatile like the mount itself. LG's file stays unde
 without the hook gives LG's Home back. Verified on an LG 49UN7100
 (webOS 5): Home key to Luma in about 0.4 s instead of a restart of about 2 s.
 
+On an LG 55UQ801C0SB running firmware 04.60.90, internal webOS 7.6.0-19 (marketed as
+webOS 22), the same executable method was tested on the actual TV. The native Home manifest
+declares `file:///usr/bin/com.webos.app.home` and lifecycle interface 2. The owner confirmed
+the physical Home key returns to Luma from YouTube and another app. A live disable restored
+the stock executable's SHA-256 and opened LG Home, then the modified ARM helper successfully
+enabled takeover through the normal command. `com.webos.app.fullhome` is not enabled for 7.x.
+This does not extend manifest takeover to webOS 7 or claim support for internal 8.x.
+
+The existing `64-luma-home` hook reapplied the executable mount after a software reboot on
+that TV. LG's power-on input policy still selected HDMI 2; a separate owner-local, one-shot
+hook opening the mounted Home was then tested successfully after another software reboot.
+That additional launch policy is outside this change (see the separate power-on work in #89).
+These observations do not claim an unplug/replug cold-start test or an early-boot takeover.
+
 webOS 24 (9.x) also uses this method because its SAM has no `releaseBlockSystemApp` to reread a
 mounted Home manifest. The author verified takeover, same-process Home-key relaunch and cold-boot
 reapplication on one LG OLED65G46LA (2024 G4), running `9.2.4-48`. A
@@ -797,6 +886,22 @@ with Luma 2.18.0. The reporter initially saw LG Home on the first startup after 
 Start+, with subsequent startups and wakes behaving as expected. This does not verify
 same-process relaunch or early-boot timing on that model; treat this path as experimental rather
 than a claim of support for every webOS 24 TV.
+
+### Home background preloading
+
+For both executable and manifest Home integration, a nonempty SAM `preload` launch parameter
+creates a hidden, unfocused window without presenting frames. Background lifecycle `relaunch`
+requests carrying a nonempty `preload` at the top level or in `parameters` are ignored: they do
+not show/raise the window, reset the UI, refresh inventory or arm the foreground watchdog.
+Ordinary Home activation still restores/shows/raises Luma; normal Luma tile startup is unchanged.
+This incorporates the hidden-startup approach from #157 and additionally handles warm preload
+relaunches. Startup hiding does not depend on lifecycle registration succeeding.
+
+Manual TV acceptance is still required for these combined fixes: preload a new and an existing
+Home while an app or HDMI input is foreground, activate Home afterward, repeat background/Home
+cycles, and leave streaming paused for an extended period. Also verify registration-refused or
+`/var/lib/luma-home/no-lifecycle` restart fallback. Host tests do not establish compositor behavior,
+long-session foreground stability, standby or cold-boot behavior.
 
 ### Home lifecycle on webOS 10/11
 

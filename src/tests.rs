@@ -4,11 +4,14 @@ use crate::{
     state::{Direction, Effect, Overlay, Page, State, Target},
     storage, view,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf};
 
 #[path = "recents-tests.rs"]
 mod recent_tests;
+
+#[path = "channel-switcher-tests.rs"]
+mod channel_switcher_tests;
 
 #[path = "wallpapers-ui-tests.rs"]
 mod wallpaper_tests;
@@ -22,10 +25,59 @@ mod input_icon_tests;
 #[path = "glass-home-tests.rs"]
 mod glass_home_tests;
 
+#[path = "app-sorting-tests.rs"]
+mod app_sorting_tests;
+
+#[path = "weather-style-tests.rs"]
+mod weather_style_tests;
+
 fn ready() -> State {
     let mut state = State::new(Preferences::default());
     state.set_inventory(demo_inventory(), None);
     state
+}
+
+#[test]
+fn ui_sounds_default_off_and_toggle_without_moving_controls() {
+    assert!(!Preferences::default().ui_sounds);
+    let legacy: Preferences = serde_json::from_value(json!({"hour_24": true})).unwrap();
+    assert!(!legacy.ui_sounds);
+    assert!(legacy.hour_24);
+    for pointer in [false, true] {
+        let mut state = ready();
+        state.open(2);
+        state.direction(Direction::Right, &controls(&state));
+        for _ in 0..4 {
+            state.direction(Direction::Down, &controls(&state));
+        }
+        assert_eq!(state.focus, Target::Setting(11));
+        state.pointer = pointer;
+        let before = controls(&state)
+            .into_iter()
+            .find(|c| c.target == state.focus)
+            .unwrap()
+            .rect;
+        assert_eq!(state.activate(), [Effect::Save]);
+        assert!(state.preferences.ui_sounds);
+        assert_eq!(state.focus, Target::Setting(11));
+        let loaded: Preferences =
+            serde_json::from_slice(&serde_json::to_vec(&state.preferences).unwrap()).unwrap();
+        assert!(loaded.ui_sounds);
+        assert_eq!(loaded.hour_24, state.preferences.hour_24);
+        let after = controls(&state)
+            .into_iter()
+            .find(|c| c.target == state.focus)
+            .unwrap()
+            .rect;
+        assert_eq!(
+            (before.x, before.y, before.w, before.h),
+            (after.x, after.y, after.w, after.h)
+        );
+        assert_eq!(state.activate(), [Effect::Save]);
+        assert!(!state.preferences.ui_sounds);
+        state.back();
+        assert!(!state.preferences.ui_sounds);
+    }
 }
 
 fn manage_apps(state: &mut State) {
@@ -250,14 +302,10 @@ fn remote_routes_from_header_and_back_through_settings() {
     assert_eq!(state.focus, Target::Sidebar(0));
     state.back();
     assert_eq!(state.page, Page::Home);
-    assert_eq!(
-        state.back(),
-        vec![Effect::Recent {
-            generation: 1,
-            command: crate::recents::Command::List
-        }]
-    );
-    assert!(state.recents_open());
+    let focus = state.focus.clone();
+    assert!(state.back().is_empty());
+    assert!(!state.recents_open());
+    assert_eq!(state.focus, focus);
 }
 
 #[test]
@@ -324,12 +372,14 @@ fn keyboard_is_modal_and_back_restores_its_setting_after_editing() {
 #[test]
 fn partial_refresh_preserves_valid_inputs_and_never_invents_tv_apps() {
     let mut state = ready();
+    let channels = state.inventory.channels.len();
     state.set_inventory(
         crate::model::Inventory::default(),
-        Some("Inputs unavailable".into()),
+        Some("Inputs could not be refreshed: unavailable. Channels could not be refreshed: unavailable".into()),
     );
     assert!(state.inventory.apps.is_empty());
     assert_eq!(state.inventory.inputs.len(), 3);
+    assert_eq!(state.inventory.channels.len(), channels);
     assert_eq!(state.first_content(), Target::WeatherConfigure);
 }
 
@@ -392,6 +442,7 @@ fn asset_loading_and_unknown_app_cards_do_not_require_collected_artwork() {
             crate::model::Inventory {
                 apps: vec![App::new("com.example.regional", "Regional App")],
                 inputs: vec![],
+                channels: vec![],
             },
             None,
         );
@@ -2028,6 +2079,111 @@ fn keyboard_done_saves_a_typed_input_name() {
 }
 
 #[test]
+fn home_preload_launches_start_hidden() {
+    for key in ["nid", "appId"] {
+        for id in [crate::platform::HOME_ID, crate::platform::FULL_HOME_ID] {
+            for mode in [
+                "full",
+                "semi-full",
+                "partial",
+                "minimal",
+                "criu",
+                "future-mode",
+            ] {
+                let mut options = crate::Options::default();
+                options.apply_launch_metadata(&json!({
+                    "@system_native_app": true,
+                    (key): id,
+                    "preload": mode,
+                }));
+                assert!(options.webos_home);
+                assert_eq!(options.preload.as_deref(), Some(mode));
+                assert!(options.start_hidden(), "{key}={id}, preload={mode}");
+            }
+        }
+    }
+}
+
+#[test]
+fn ordinary_home_launches_do_not_start_hidden() {
+    for key in ["nid", "appId"] {
+        for id in [crate::platform::HOME_ID, crate::platform::FULL_HOME_ID] {
+            for preload in [Value::Null, json!(""), json!(true), json!(1)] {
+                let mut options = crate::Options::default();
+                options.apply_launch_metadata(&json!({(key): id, "preload": preload}));
+                assert!(options.webos_home);
+                assert_eq!(options.preload, None);
+                assert!(!options.start_hidden());
+            }
+            let mut options = crate::Options::default();
+            options.apply_launch_metadata(&json!({(key): id}));
+            assert!(!options.start_hidden());
+        }
+    }
+}
+
+#[test]
+fn normal_app_preload_does_not_change_startup_visibility() {
+    for metadata in [
+        json!({"nid": crate::platform::APP_ID, "preload": "full"}),
+        json!({"appId": crate::platform::APP_ID, "preload": "full"}),
+        json!({"preload": "full"}),
+        json!({}),
+    ] {
+        let mut options = crate::Options::default();
+        options.apply_launch_metadata(&metadata);
+        assert!(!options.webos_home);
+        assert_eq!(options.preload, None);
+        assert!(!options.start_hidden(), "{metadata}");
+    }
+}
+
+#[test]
+fn home_preload_relaunches_do_not_activate_or_close_the_window() {
+    use crate::platform::Lifecycle;
+    for key in ["event", "message"] {
+        for mode in [
+            "full",
+            "semi-full",
+            "partial",
+            "minimal",
+            "criu",
+            "future-mode",
+        ] {
+            for parameters in [false, true] {
+                let mut reply = json!({(key): "relaunch", "returnValue": true});
+                if parameters {
+                    reply["parameters"] = json!({"preload": mode});
+                } else {
+                    reply["preload"] = json!(mode);
+                }
+                assert_eq!(Lifecycle::from_reply(&reply), None, "{reply}");
+                // Close still terminates a preloaded Home rather than leaving it registered.
+                reply[key] = json!("close");
+                assert_eq!(Lifecycle::from_reply(&reply), Some(Lifecycle::Close));
+            }
+        }
+        for preload in [Value::Null, json!(""), json!(true), json!(1)] {
+            let reply = json!({(key): "relaunch", "preload": preload,
+                "parameters": {"preload": preload, "launchType": "homeKey"}});
+            assert_eq!(Lifecycle::from_reply(&reply), Some(Lifecycle::Relaunch));
+        }
+        // A later ordinary Home activation must still reveal the hidden instance.
+        for parameters in [Value::Null, json!({}), json!({"launchType": "homeKey"})] {
+            assert_eq!(
+                Lifecycle::from_reply(&json!({(key): "relaunch", "parameters": parameters})),
+                Some(Lifecycle::Relaunch)
+            );
+        }
+        assert_eq!(
+            Lifecycle::from_reply(&json!({(key): "relaunch", "preload": "",
+                "parameters": {"preload": "full"}})),
+            None
+        );
+    }
+}
+
+#[test]
 fn home_lifecycle_replies_map_for_both_registration_versions() {
     use crate::platform::Lifecycle;
     // Lifecycle v2 (registerApp, in place of LG's Home executable) names it in "event".
@@ -2406,17 +2562,19 @@ fn widgets_group_existing_settings_and_restore_each_parent_without_changing_pref
             _ => None,
         })
         .collect();
-    assert_eq!(widget_order, [1, 2, 3]);
-    for (index, subpage) in [Subpage::Weather, Subpage::Shortcuts, Subpage::Inputs]
-        .into_iter()
-        .enumerate()
-    {
-        state.focus = Target::Widget(index + 1);
+    assert_eq!(widget_order, [1, 2, 3, 5]);
+    for (widget, subpage) in [
+        (1, Subpage::Weather),
+        (2, Subpage::Shortcuts),
+        (3, Subpage::Inputs),
+        (5, Subpage::Channels),
+    ] {
+        state.focus = Target::Widget(widget);
         state.direction(Direction::Right, &controls(&state));
         assert_eq!(state.subpage, Some(subpage));
         state.back();
         assert!(state.subpage.is_none());
-        assert_eq!(state.focus, Target::Widget(index + 1));
+        assert_eq!(state.focus, Target::Widget(widget));
     }
     state.direction(Direction::Left, &controls(&state));
     assert_eq!(state.focus, Target::Sidebar(WIDGETS_SECTION));
@@ -2483,9 +2641,9 @@ fn widgets_are_localized_without_legacy_sidebar_entries() {
                 .iter()
                 .filter(|c| matches!(c.target, Target::Widget(_)))
                 .count(),
-            3
+            4
         );
-        for key in ["widgets", "weather", "shortcuts", "inputs"] {
+        for key in ["widgets", "weather", "shortcuts", "inputs", "channels"] {
             assert!(page.draw.iter().any(|draw| matches!(draw, crate::renderer::Draw::Text(label, ..) if label == language.t(key))), "{key}/{language:?}");
         }
         state.pointer_focus(Target::Sidebar(0));

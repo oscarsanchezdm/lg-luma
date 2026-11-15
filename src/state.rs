@@ -29,6 +29,8 @@ pub const HOME_TILE_WIDTH: f32 = 270.;
 pub const HOME_TILE_PITCH: f32 = 296.4;
 pub const HOME_FADE_LEFT: f32 = 8.;
 pub const HOME_FADE_RIGHT: f32 = 1910.;
+pub const CHANNEL_TILE_WIDTH: f32 = 168.;
+pub const CHANNEL_TILE_PITCH: f32 = 184.;
 pub const BACKGROUND_FADE: f32 = 0.4;
 pub const CYCLE_FADE: f32 = 1.6;
 
@@ -60,6 +62,14 @@ pub enum Target {
     RecentRetry,
     App(String),
     DockApp(String),
+    /// Home channels strip tile.
+    Channel(String),
+    /// Channel Back switcher carousel card.
+    ChannelSwitch(String),
+    /// Settings → Channels: show/hide the Home strip widget.
+    ChannelsToggle,
+    /// Settings → Channels row: toggle Home strip membership.
+    ChannelFavorite(String),
     Input(String),
     Filter(usize),
     Search,
@@ -97,6 +107,7 @@ pub enum Target {
     WeatherToggle,
     WeatherLocation,
     WeatherTemperature,
+    WeatherStyle,
     WeatherQuery,
     WeatherSearch,
     WeatherClear,
@@ -143,6 +154,7 @@ pub enum Overlay {
     Options { id: String, restore: Target },
     Delete { id: String, restore: Target },
     Recents { restore: Target },
+    ChannelSwitcher { restore: Target },
     Keyboard,
     SystemKeyboard,
     WallpaperUpload,
@@ -159,6 +171,7 @@ pub enum Subpage {
     Weather,
     Shortcuts,
     Inputs,
+    Channels,
     Clock,
     ClockFormat,
     TimeFormat,
@@ -166,7 +179,9 @@ pub enum Subpage {
     InputIcons(String),
     WeatherLocation,
     Temperature,
+    WeatherStyle,
     Language,
+    AppSorting,
     TextRendering,
 }
 
@@ -194,6 +209,9 @@ pub enum Effect {
     /// Refresh apps: read the inventory and every app icon again.
     Reload,
     Launch(String),
+    OpenChannel(String),
+    /// Reload now-playing for Home channel favorites (or a short preview set).
+    RefreshChannelGuide,
     Uninstall(String),
     DeleteWallpaper(String),
     Recent {
@@ -224,6 +242,8 @@ pub struct State {
     pub subpage: Option<Subpage>,
     pub scroll: f32,
     pub home_scroll: f32,
+    /// Horizontal offset for the Home channels strip (independent of favorites).
+    pub channel_scroll: f32,
     pub drawer_visibility: f32,
     drawer_updated: Instant,
     input_status_visibility: std::collections::BTreeMap<String, f32>,
@@ -262,6 +282,7 @@ pub struct State {
     pub greeting_name_draft: String,
     pub input_name: String,
     pub recents: crate::recents::Recents,
+    pub channel_switcher: crate::channel_switcher::ChannelSwitcher,
 }
 
 impl State {
@@ -277,6 +298,7 @@ impl State {
             subpage: None,
             scroll: 0.,
             home_scroll: 0.,
+            channel_scroll: 0.,
             drawer_visibility: 0.,
             drawer_updated: Instant::now(),
             input_status_visibility: std::collections::BTreeMap::new(),
@@ -310,6 +332,7 @@ impl State {
             greeting_name_draft: String::new(),
             input_name: String::new(),
             recents: crate::recents::Recents::default(),
+            channel_switcher: crate::channel_switcher::ChannelSwitcher::default(),
         }
     }
 
@@ -420,6 +443,15 @@ impl State {
                 Instant::now(),
             );
         }
+        let switcher_open = self.channel_switcher_open();
+        if switcher_open || self.channel_switcher.visibility > 0. {
+            self.dirty |= self.channel_switcher.animate(
+                switcher_open,
+                self.preferences.reduced_motion,
+                self.pointer,
+                Instant::now(),
+            );
+        }
         if let Some(start) = self.panel_started {
             self.dirty = true;
             let duration = if self.overlay.is_some() { 120 } else { 150 };
@@ -457,7 +489,7 @@ impl State {
     pub fn input_status_active(&self, id: &str) -> bool {
         let target = Target::Input(id.into());
         (!self.pointer && self.focus == target)
-            || self.hover.as_ref() == Some(&target)
+            || (self.pointer && self.hover.as_ref() == Some(&target))
             || self.pressed.as_ref() == Some(&target)
     }
 
@@ -517,6 +549,10 @@ impl State {
             || ((self.recents_open() || self.recents.visibility > 0.)
                 && (self.recents.visibility != if self.recents_open() { 1. } else { 0. }
                     || self.recents.cards_animating(self.pointer)))
+            || ((self.channel_switcher_open() || self.channel_switcher.visibility > 0.)
+                && (self.channel_switcher.visibility
+                    != if self.channel_switcher_open() { 1. } else { 0. }
+                    || self.channel_switcher.cards_animating(self.pointer)))
             || self.previous_background.is_some()
             || self.panel_started.is_some()
             || (!self.preferences.reduced_motion
@@ -533,6 +569,8 @@ impl State {
         self.recents.pending = None;
         self.recents.visibility = 0.;
         self.recents.closing_focus = None;
+        self.channel_switcher.visibility = 0.;
+        self.channel_switcher.closing_focus = None;
         self.wallpaper_upload = None;
         self.pointer = false;
         self.pressed = None;
@@ -551,6 +589,9 @@ impl State {
         self.scroll = 0.;
         if self.page == Page::Home {
             self.home_scroll = 0.;
+            self.channel_scroll = 0.;
+        } else {
+            self.channel_scroll = 0.;
         }
         self.query.clear();
         self.filter = 0;
@@ -596,6 +637,24 @@ impl State {
         self.app_list(true)
     }
 
+    /// Count successful app launches only, never inputs, system actions or preview cards.
+    pub fn record_app_launch(&mut self, id: &str) -> Vec<Effect> {
+        if !self.inventory.apps.iter().any(|app| app.id == id)
+            || crate::scroll_preview::is_placeholder(id)
+            || self.preferences.custom_tile(id).is_some()
+        {
+            return vec![];
+        }
+        let count = self
+            .preferences
+            .app_launch_counts
+            .entry(id.into())
+            .or_default();
+        *count = count.saturating_add(1);
+        self.dirty = true;
+        vec![Effect::Save]
+    }
+
     fn app_list(&self, drawer: bool) -> Vec<&App> {
         let ids = self.preferences.favorites(&self.inventory.apps);
         let dock = if drawer { self.dock_apps() } else { vec![] };
@@ -616,7 +675,7 @@ impl State {
             };
             rank(a)
                 .cmp(&rank(b))
-                .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+                .then_with(|| self.preferences.compare_apps(a, b))
         });
         apps
     }
@@ -643,12 +702,7 @@ impl State {
                         && !apps.iter().any(|pinned| pinned.id == app.id)
                 })
                 .collect();
-            remaining.sort_by(|a, b| {
-                a.title
-                    .to_lowercase()
-                    .cmp(&b.title.to_lowercase())
-                    .then_with(|| a.id.cmp(&b.id))
-            });
+            remaining.sort_by(|a, b| self.preferences.compare_apps(a, b));
             apps.extend(remaining.into_iter().take(6 - apps.len()));
         }
         apps
@@ -758,6 +812,12 @@ impl State {
         {
             return false;
         }
+        let over_channels = self.page == Page::Home
+            && position.is_some_and(|(x, y)| {
+                controls.iter().any(|control| {
+                    matches!(control.target, Target::Channel(_)) && control.rect.contains(x, y)
+                })
+            });
         let over_favorites = (self.page == Page::Home || self.page == Page::Apps)
             && position.is_some_and(|(x, y)| {
                 self.favorites_viewport().contains(x, y)
@@ -769,7 +829,9 @@ impl State {
             });
         let favorites =
             (self.page == Page::Home || self.page == Page::Apps) && (x != 0 || over_favorites);
-        if favorites {
+        if over_channels {
+            self.scroll_channels((if x != 0 { x } else { -y }) as f32 * CHANNEL_TILE_PITCH);
+        } else if favorites {
             self.scroll_favorites((if x != 0 { x } else { -y }) as f32 * HOME_TILE_PITCH);
         } else {
             let bottom = self.scroll_bottom();
@@ -784,7 +846,7 @@ impl State {
         }
         self.pointer = true;
         self.dirty = true;
-        favorites
+        over_channels || favorites
     }
 
     pub fn scroll_favorites(&mut self, delta: f32) {
@@ -802,19 +864,72 @@ impl State {
         }
     }
 
+    pub fn scroll_channels(&mut self, delta: f32) {
+        let count = self.home_channels().len();
+        let content = if count == 0 {
+            0.
+        } else {
+            (count - 1) as f32 * CHANNEL_TILE_PITCH + CHANNEL_TILE_WIDTH
+        };
+        let max = (content - (HOME_STRIP_RIGHT - HOME_STRIP_LEFT)).max(0.);
+        let next = (self.channel_scroll + delta).clamp(0., max);
+        if next != self.channel_scroll {
+            self.channel_scroll = next;
+            self.dirty = true;
+        }
+    }
+
     pub fn set_inventory(&mut self, next: Inventory, warning: Option<String>) {
         self.inventory.apps = next.apps;
         self.sync_custom_tiles();
+        let input_failed = warning
+            .as_ref()
+            .is_some_and(|text| text.contains("Inputs could not"));
+        let channel_failed = warning
+            .as_ref()
+            .is_some_and(|text| text.contains("Channels could not"));
+        if !input_failed {
+            self.inventory.inputs = next.inputs;
+        }
+        if !channel_failed {
+            self.inventory.channels = next.channels;
+        }
         if let Some(warning) = warning {
             self.notify(warning);
-        } else {
-            self.inventory.inputs = next.inputs;
         }
         self.loading = false;
         self.error = None;
         self.inventory_failures = 0;
         self.dirty = true;
         self.reconcile_focus();
+    }
+
+    pub fn set_channel_guide(
+        &mut self,
+        programs: std::collections::HashMap<String, crate::model::ChannelGuideEntry>,
+    ) {
+        crate::channels::apply_programs(&mut self.inventory.channels, &programs);
+        self.dirty = true;
+    }
+
+    pub fn home_channels(&self) -> Vec<&crate::model::Channel> {
+        if !self.preferences.show_channels {
+            return vec![];
+        }
+        self.preferences.channel_favorites(&self.inventory.channels)
+    }
+
+    /// Settings → Channels list: Home favorites first, then the rest of the map.
+    /// Independent of `show_channels` so favorites can still be edited while the strip is off.
+    pub fn channels_settings_list(&self) -> Vec<&crate::model::Channel> {
+        let mut ordered = self.preferences.channel_favorites(&self.inventory.channels);
+        ordered.extend(
+            self.inventory
+                .channels
+                .iter()
+                .filter(|channel| !self.preferences.channel_on_home(&channel.id)),
+        );
+        ordered
     }
 
     /// Replace only input status; leave installed apps, artwork and saved preferences alone.
@@ -878,6 +993,7 @@ impl State {
     pub fn reconcile_focus(&mut self) {
         if self.page == Page::Home {
             self.scroll_favorites(0.);
+            self.scroll_channels(0.);
         }
         if let Target::App(id) = &self.focus
             && !self.apps().iter().any(|app| &app.id == id)
@@ -888,6 +1004,42 @@ impl State {
             && !self.dock_apps().iter().any(|app| &app.id == id)
         {
             self.focus = self.first_content();
+        }
+        if let Target::Channel(id) = &self.focus
+            && !self.home_channels().iter().any(|channel| &channel.id == id)
+        {
+            self.focus = self
+                .home_channels()
+                .first()
+                .map(|channel| Target::Channel(channel.id.clone()))
+                .unwrap_or_else(|| self.first_content());
+        }
+        if let Target::ChannelSwitch(id) = &self.focus
+            && self.channel_switcher_open()
+        {
+            let channels = self.home_channels();
+            if !channels.iter().any(|channel| &channel.id == id) {
+                self.focus = channels
+                    .get(self.channel_switcher.selected)
+                    .or_else(|| channels.first())
+                    .map(|channel| Target::ChannelSwitch(channel.id.clone()))
+                    .unwrap_or_else(|| self.first_content());
+            }
+        }
+        if let Target::ChannelFavorite(id) = &self.focus
+            && self.subpage == Some(Subpage::Channels)
+            && !self
+                .inventory
+                .channels
+                .iter()
+                .any(|channel| &channel.id == id)
+        {
+            self.focus = self
+                .inventory
+                .channels
+                .first()
+                .map(|channel| Target::ChannelFavorite(channel.id.clone()))
+                .unwrap_or(Target::ChannelsToggle);
         }
         if let Target::Input(id) = &self.focus
             && !self
@@ -968,6 +1120,7 @@ impl State {
     pub fn reveal_focus(&mut self, controls: &[Control]) -> bool {
         let previous = self.scroll;
         let previous_home = self.home_scroll;
+        let previous_channel = self.channel_scroll;
         if let Some(control) = controls.iter().find(|c| c.target == self.focus) {
             if (self.page == Page::Home && matches!(self.focus, Target::App(_)))
                 || matches!(self.focus, Target::DockApp(_))
@@ -976,6 +1129,13 @@ impl State {
                     self.home_scroll += control.rect.x - HOME_STRIP_LEFT;
                 } else if control.rect.x + control.rect.w > HOME_STRIP_RIGHT {
                     self.home_scroll += control.rect.x + control.rect.w - HOME_STRIP_RIGHT;
+                }
+            }
+            if self.page == Page::Home && matches!(self.focus, Target::Channel(_)) {
+                if control.rect.x < HOME_STRIP_LEFT {
+                    self.channel_scroll += control.rect.x - HOME_STRIP_LEFT;
+                } else if control.rect.x + control.rect.w > HOME_STRIP_RIGHT {
+                    self.channel_scroll += control.rect.x + control.rect.w - HOME_STRIP_RIGHT;
                 }
             }
             if matches!(
@@ -1016,10 +1176,18 @@ impl State {
         if self.page == Page::Home || self.page == Page::Apps {
             self.scroll_favorites(0.);
         }
-        if self.scroll != previous || self.home_scroll != previous_home {
+        if self.page == Page::Home {
+            self.scroll_channels(0.);
+        }
+        if self.scroll != previous
+            || self.home_scroll != previous_home
+            || self.channel_scroll != previous_channel
+        {
             self.dirty = true;
         }
-        self.scroll != previous || self.home_scroll != previous_home
+        self.scroll != previous
+            || self.home_scroll != previous_home
+            || self.channel_scroll != previous_channel
     }
 
     /// Hover and pointer-down must not move the control before pointer-up.
@@ -1222,6 +1390,7 @@ impl State {
             Some(Subpage::Weather) => Target::Widget(1),
             Some(Subpage::Shortcuts) => Target::Widget(2),
             Some(Subpage::Inputs) => Target::Widget(3),
+            Some(Subpage::Channels) => Target::Widget(5),
             Some(Subpage::Clock) => Target::Setting(1),
             Some(Subpage::ClockFormat) => {
                 self.subpage = Some(Subpage::Clock);
@@ -1247,8 +1416,13 @@ impl State {
                 self.subpage = Some(Subpage::Weather);
                 Target::WeatherTemperature
             }
+            Some(Subpage::WeatherStyle) => {
+                self.subpage = Some(Subpage::Weather);
+                Target::WeatherStyle
+            }
             Some(Subpage::Language) => Target::Setting(4),
             Some(Subpage::TextRendering) => Target::Setting(7),
+            Some(Subpage::AppSorting) => Target::Setting(10),
             None => Target::Sidebar(self.section),
         };
         self.scroll = 0.;
@@ -1260,6 +1434,9 @@ impl State {
         self.dirty = true;
         if self.recents_open() {
             return self.recent_direction(direction);
+        }
+        if self.channel_switcher_open() {
+            return self.channel_switcher_direction(direction);
         }
         if matches!(self.overlay, Some(Overlay::Inputs | Overlay::Settings)) {
             let targets: Vec<_> = if matches!(self.overlay, Some(Overlay::Inputs)) {
@@ -1354,6 +1531,16 @@ impl State {
                 self.focus,
                 Target::Input(_) | Target::InputsMenu | Target::SettingsMenu
             ) {
+                // Header Left must not steal focus among input pills while a
+                // Settings widget subpage is open — restore the Widgets row.
+                if self.page == Page::Settings
+                    && self.subpage.is_some()
+                    && matches!(direction, Direction::Left)
+                    && matches!(self.focus, Target::SettingsMenu)
+                {
+                    self.close_subpage();
+                    return vec![];
+                }
                 let mut targets: Vec<_> = self
                     .inventory
                     .inputs
@@ -1379,11 +1566,16 @@ impl State {
                         self.focus = self.first_content();
                     }
                     Direction::Down => self.focus(
-                        if self.page == Page::Home
-                            && self.preferences.show_weather
-                            && self.preferences.weather_location.is_none()
-                        {
-                            Target::WeatherConfigure
+                        if self.page == Page::Home {
+                            if let Some(channel) = self.home_channels().first() {
+                                Target::Channel(channel.id.clone())
+                            } else if self.preferences.show_weather
+                                && self.preferences.weather_location.is_none()
+                            {
+                                Target::WeatherConfigure
+                            } else {
+                                self.first_content()
+                            }
                         } else {
                             self.first_content()
                         },
@@ -1417,20 +1609,49 @@ impl State {
             }
             if self.page == Page::Home && self.focus == Target::WeatherConfigure {
                 match direction {
-                    Direction::Down
-                        if self.focus == Target::WeatherConfigure
-                            && !self.dock_apps().is_empty() =>
-                    {
-                        self.focus(self.first_content(), controls)
-                    }
                     Direction::Down => {
-                        self.open(1);
-                        self.focus = self.first_content();
+                        if let Some(channel) = self.home_channels().first() {
+                            self.focus(Target::Channel(channel.id.clone()), controls);
+                        } else if !self.dock_apps().is_empty() {
+                            self.focus(self.first_content(), controls);
+                        } else {
+                            self.open(1);
+                            self.focus = self.first_content();
+                        }
                     }
                     Direction::Up => self.focus(self.first_input_target(), controls),
                     _ => {}
                 }
                 return vec![];
+            }
+            if self.page == Page::Home
+                && let Target::Channel(id) = &self.focus
+            {
+                let channels = self.home_channels();
+                if let Some(index) = channels.iter().position(|channel| &channel.id == id) {
+                    match direction {
+                        Direction::Left | Direction::Right => {
+                            let next = if matches!(direction, Direction::Left) {
+                                index.saturating_sub(1)
+                            } else {
+                                (index + 1).min(channels.len().saturating_sub(1))
+                            };
+                            if let Some(channel) = channels.get(next) {
+                                self.focus(Target::Channel(channel.id.clone()), controls);
+                            }
+                        }
+                        Direction::Up => self.focus(
+                            if index < 3 {
+                                self.first_input_target()
+                            } else {
+                                Target::SettingsMenu
+                            },
+                            controls,
+                        ),
+                        Direction::Down => self.focus(self.first_content(), controls),
+                    }
+                    return vec![];
+                }
             }
             if self.page == Page::Home
                 && let Target::App(id) = &self.focus
@@ -1447,14 +1668,29 @@ impl State {
                             let id = apps[next].id.clone();
                             self.focus(Target::App(id), controls);
                         }
-                        Direction::Up => self.focus(
-                            if index < 3 {
-                                self.first_input_target()
-                            } else {
-                                Target::SettingsMenu
-                            },
-                            controls,
-                        ),
+                        Direction::Up => {
+                            let channels = self.home_channels();
+                            self.focus(
+                                if !channels.is_empty() {
+                                    let channel = channels
+                                        .get(index.min(channels.len() - 1))
+                                        .or_else(|| channels.first())
+                                        .map(|channel| Target::Channel(channel.id.clone()));
+                                    channel.unwrap_or_else(|| {
+                                        if index < 3 {
+                                            self.first_input_target()
+                                        } else {
+                                            Target::SettingsMenu
+                                        }
+                                    })
+                                } else if index < 3 {
+                                    self.first_input_target()
+                                } else {
+                                    Target::SettingsMenu
+                                },
+                                controls,
+                            )
+                        }
                         Direction::Down => {
                             self.open(1);
                             self.focus = self.first_content();
@@ -1510,7 +1746,8 @@ impl State {
                         Subpage::ClockFormat
                         | Subpage::TimeFormat
                         | Subpage::Temperature
-                        | Subpage::TextRendering,
+                        | Subpage::TextRendering
+                        | Subpage::AppSorting,
                     ) => 2,
                     Some(Subpage::InputIcons(_)) => crate::model::INPUT_ICONS.len() + 1,
                     Some(Subpage::Language) => Language::ALL.len(),
@@ -1607,20 +1844,31 @@ impl State {
                     | Target::WeatherToggle
                     | Target::WeatherLocation
                     | Target::WeatherTemperature
+                    | Target::WeatherStyle
+                    | Target::ChannelsToggle
+                    | Target::ChannelFavorite(_)
                     | Target::Widget(_)
-            ) || (self.focus == Target::Setting(3) && self.subpage == Some(Subpage::Inputs)))
+                    | Target::SettingsMenu
+            ) || (self.focus == Target::Setting(3) && self.subpage == Some(Subpage::Inputs))
+                || (self.focus == Target::Setting(6) && self.subpage == Some(Subpage::Channels)))
                 && matches!(direction, Direction::Left)
+                && self.subpage.is_some()
             {
+                // Left from a widget subpage (or its header) always restores the
+                // Widgets row. Never spatial-navigate to the sidebar while the
+                // subpage is still open — that left Channels looking "stuck".
                 self.close_subpage();
                 return vec![];
             }
             if matches!(
                 self.focus,
-                Target::Setting(0 | 1 | 4 | 7)
+                Target::Setting(0 | 1 | 4 | 7 | 10)
                     | Target::Widget(_)
                     | Target::InputMode(_)
+                    | Target::ChannelFavorite(_)
                     | Target::WeatherLocation
                     | Target::WeatherTemperature
+                    | Target::WeatherStyle
             ) && matches!(direction, Direction::Right)
             {
                 return self.activate();
@@ -1641,11 +1889,81 @@ impl State {
                 self.focus(Target::SettingsMenu, controls);
                 return vec![];
             }
+            if self.focus == Target::ChannelsToggle && self.subpage == Some(Subpage::Channels) {
+                match direction {
+                    Direction::Up => self.focus(Target::SettingsMenu, controls),
+                    Direction::Down => {
+                        if let Some(channel) = self.channels_settings_list().first() {
+                            self.focus(Target::ChannelFavorite(channel.id.clone()), controls);
+                        } else {
+                            self.focus(Target::Setting(6), controls);
+                        }
+                    }
+                    Direction::Right => return self.activate(),
+                    Direction::Left => {
+                        self.close_subpage();
+                        return vec![];
+                    }
+                }
+                return vec![];
+            }
+            if let Target::ChannelFavorite(id) = &self.focus
+                && self.subpage == Some(Subpage::Channels)
+            {
+                let channels = self.channels_settings_list();
+                if let Some(index) = channels.iter().position(|channel| &channel.id == id) {
+                    match direction {
+                        Direction::Left => {
+                            self.close_subpage();
+                            return vec![];
+                        }
+                        Direction::Up if index == 0 => {
+                            self.focus(Target::ChannelsToggle, controls);
+                            return vec![];
+                        }
+                        Direction::Up => {
+                            self.focus(
+                                Target::ChannelFavorite(channels[index - 1].id.clone()),
+                                controls,
+                            );
+                            return vec![];
+                        }
+                        Direction::Down if index + 1 < channels.len() => {
+                            self.focus(
+                                Target::ChannelFavorite(channels[index + 1].id.clone()),
+                                controls,
+                            );
+                            return vec![];
+                        }
+                        Direction::Down => {
+                            self.focus(Target::Setting(6), controls);
+                            return vec![];
+                        }
+                        Direction::Right => return self.activate(),
+                    }
+                } else if matches!(direction, Direction::Left) {
+                    self.close_subpage();
+                    return vec![];
+                }
+            }
+            if self.focus == Target::Setting(6)
+                && self.subpage == Some(Subpage::Channels)
+                && matches!(direction, Direction::Up)
+            {
+                if let Some(channel) = self.channels_settings_list().last() {
+                    self.focus(Target::ChannelFavorite(channel.id.clone()), controls);
+                } else {
+                    self.focus(Target::ChannelsToggle, controls);
+                }
+                return vec![];
+            }
             if self.focus == Target::Setting(1) && matches!(direction, Direction::Up) {
                 self.focus(Target::SettingsMenu, controls);
                 return vec![];
             }
-            if self.focus == Target::WeatherToggle && matches!(direction, Direction::Up) {
+            if matches!(self.focus, Target::WeatherToggle | Target::ChannelsToggle)
+                && matches!(direction, Direction::Up)
+            {
                 self.focus(Target::SettingsMenu, controls);
                 return vec![];
             }
@@ -1754,8 +2072,9 @@ impl State {
                         Direction::Right => Some(Target::App(
                             apps[(index + 1).min(apps.len() - 1)].id.clone(),
                         )),
-                        Direction::Up if index < APPS_COLUMNS => Some(
-                            self.dock_apps()
+                        Direction::Up if index < APPS_COLUMNS => {
+                            let target = self
+                                .dock_apps()
                                 .get(index.min(self.dock_apps().len().saturating_sub(1)))
                                 .map_or(
                                     if index < 3 {
@@ -1763,9 +2082,13 @@ impl State {
                                     } else {
                                         Target::SettingsMenu
                                     },
-                                    |app| Target::DockApp(app.id.clone()),
-                                ),
-                        ),
+                                    |app| Target::App(app.id.clone()),
+                                );
+                            // Reaching the favorites row returns to Home immediately,
+                            // preserving the selected column instead of requiring another Up.
+                            self.open(0);
+                            Some(target)
+                        }
                         Direction::Up => Some(Target::App(apps[index - APPS_COLUMNS].id.clone())),
                         Direction::Down
                             if (index / APPS_COLUMNS + 1) * APPS_COLUMNS < apps.len() =>
@@ -2314,6 +2637,17 @@ impl State {
                 _ => vec![],
             };
         }
+        if self.channel_switcher_open() {
+            return match self.focus.clone() {
+                Target::ChannelSwitch(id) if !self.launching => {
+                    // Match Recents: dismiss the carousel first, then tune so Live TV
+                    // can take the foreground instead of leaving the overlay up.
+                    let _ = self.back();
+                    vec![Effect::OpenChannel(id)]
+                }
+                _ => vec![],
+            };
+        }
         if self.moving.take().is_some() {
             // Order was saved at every move. A fresh OK release finishes the
             // mode and keeps the selected favorite, rather than launching it.
@@ -2369,6 +2703,15 @@ impl State {
                 return vec![Effect::Launch("com.palm.app.settings".into())];
             }
             Target::App(_) if self.managing_apps() && !self.launching => self.options(),
+            Target::Channel(id) if !self.launching => {
+                return vec![Effect::OpenChannel(id)];
+            }
+            Target::ChannelFavorite(id) => {
+                if self.preferences.toggle_channel_favorite(&id) {
+                    return vec![Effect::Save, Effect::RefreshChannelGuide];
+                }
+                self.notify(self.preferences.language.t("channelFavoritesFull"));
+            }
             Target::App(id) | Target::DockApp(id) | Target::Input(id) if !self.launching => {
                 if matches!(self.overlay, Some(Overlay::Inputs)) {
                     self.back();
@@ -2405,12 +2748,25 @@ impl State {
                 self.weather.invalidate_forecast();
                 return vec![Effect::Save];
             }
+            Target::ChannelsToggle => {
+                self.preferences.show_channels = !self.preferences.show_channels;
+                self.dirty = true;
+                return vec![Effect::Save];
+            }
             Target::WeatherLocation => self.open_location(),
             Target::WeatherTemperature => {
                 self.subpage = Some(Subpage::Temperature);
                 self.focus = Target::Choice(usize::from(
                     self.preferences.temperature_unit == Unit::Fahrenheit,
                 ));
+                if !self.preferences.reduced_motion {
+                    self.panel_started = Some(Instant::now());
+                }
+            }
+            Target::WeatherStyle => {
+                self.subpage = Some(Subpage::WeatherStyle);
+                self.focus = Target::Choice(self.preferences.weather_style.index());
+                self.scroll = 0.;
                 if !self.preferences.reduced_motion {
                     self.panel_started = Some(Instant::now());
                 }
@@ -2489,6 +2845,7 @@ impl State {
                             .map(|input| Target::InputMode(input.id.clone()))
                             .unwrap_or(Target::Setting(3)),
                     ),
+                    5 => (Subpage::Channels, Target::ChannelsToggle),
                     _ => return vec![],
                 };
                 self.section = WIDGETS_SECTION;
@@ -2580,6 +2937,17 @@ impl State {
             }
             Target::Setting(index) => {
                 match index {
+                    10 => {
+                        self.subpage = Some(Subpage::AppSorting);
+                        self.focus = Target::Choice(usize::from(
+                            self.preferences.app_sorting == crate::model::AppSorting::Usage,
+                        ));
+                        self.scroll = 0.;
+                        if !self.preferences.reduced_motion {
+                            self.panel_started = Some(Instant::now());
+                        }
+                        return vec![];
+                    }
                     1 => {
                         self.subpage = Some(Subpage::Clock);
                         self.scroll = 0.;
@@ -2590,6 +2958,7 @@ impl State {
                         return vec![];
                     }
                     2 => self.preferences.reduced_motion = !self.preferences.reduced_motion,
+                    11 => self.preferences.ui_sounds = !self.preferences.ui_sounds,
                     4 => {
                         self.subpage = Some(Subpage::Language);
                         self.focus = Target::Choice(self.preferences.language.index());
@@ -2684,6 +3053,13 @@ impl State {
             }
             Target::Choice(index) => {
                 match self.subpage.clone() {
+                    Some(Subpage::WeatherStyle) => {
+                        self.preferences.weather_style =
+                            crate::model::WeatherStyle::ALL[index.min(2)];
+                    }
+                    Some(Subpage::AppSorting) => {
+                        self.preferences.app_sorting = crate::model::AppSorting::ALL[index.min(1)];
+                    }
                     Some(Subpage::ClockFormat) => self.preferences.hour_24 = index == 1,
                     Some(Subpage::TimeFormat) => self.preferences.show_seconds = index == 1,
                     Some(Subpage::DateFormat) => {
@@ -2733,7 +3109,8 @@ impl State {
                         | Subpage::Clock
                         | Subpage::Weather
                         | Subpage::Shortcuts
-                        | Subpage::Inputs,
+                        | Subpage::Inputs
+                        | Subpage::Channels,
                     ) => {
                         return vec![];
                     }
@@ -2949,7 +3326,19 @@ impl State {
                     self.recents.closing_focus = None;
                 }
             }
-            if let Overlay::Options { restore, .. } | Overlay::Recents { restore } = overlay {
+            if matches!(overlay, Overlay::ChannelSwitcher { .. }) {
+                self.channel_switcher.closing_focus = Some(self.focus.clone());
+                self.channel_switcher.updated = Instant::now();
+                self.pressed = None;
+                if self.preferences.reduced_motion {
+                    self.channel_switcher.visibility = 0.;
+                    self.channel_switcher.closing_focus = None;
+                }
+            }
+            if let Overlay::Options { restore, .. }
+            | Overlay::Recents { restore }
+            | Overlay::ChannelSwitcher { restore } = overlay
+            {
                 self.focus = restore;
                 self.recents.pending = None;
                 self.reconcile_focus();
@@ -2974,9 +3363,13 @@ impl State {
         if self.page != Page::Home {
             self.open(0);
             self.focus = self.first_content();
-            vec![]
-        } else {
-            self.open_recents()
+            return vec![];
         }
+        // Short Back on Home never opens Recents (hold does). A focused channel
+        // favorite still opens the channel switcher.
+        if matches!(self.focus, Target::Channel(_)) && !self.home_channels().is_empty() {
+            return self.open_channel_switcher();
+        }
+        vec![]
     }
 }

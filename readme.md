@@ -2,7 +2,7 @@
 
 A native launcher for rooted LG webOS TVs, inspired by Apple TV.
 
-https://github.com/user-attachments/assets/2156d640-b8fa-4ea4-a02c-0db4c93bcc5a
+https://github.com/user-attachments/assets/5b2c6e78-ec77-41f5-a79a-1fcfbe8e524b
 
 <details>
 <summary>Screenshots</summary>
@@ -36,8 +36,17 @@ date have been removed.
 
 - **Left / Right** browses favorites. Hold **OK** to reorder them.
 - **Down** from favorites opens the animated six-column app drawer.
+- **Up** from the drawer’s first app row returns Home with the corresponding favorite selected.
 - **Up** from favorites reaches the corner controls.
 - **Back** closes the drawer and focuses the first favorite.
+- **Settings → General → App sorting** chooses **Alphabetically** (default) or **Usage count**.
+  Usage sorts by successful launches from Luma, most used first, with alphabetical ties.
+  Counts stay local and persist across restarts. Favorites keep their manual order.
+- **Settings → General → UI sounds** enables soft, tvOS-inspired navigation, select, and back
+  feedback. Off by default; uses original synthesized sounds, not Apple recordings.
+- **Settings → Widgets → Weather → Widget style** offers **Standard**, **No icon**,
+  and **Compact**, with a preview of every design before choosing. Compact
+  places a small condition icon on the second line beside the condition and location.
 - **OK / click** launches apps directly. Manage favorites, hidden apps, and uninstall actions in
   **Luma Settings → Apps**. Hidden apps remain listed there.
 - Direct **input pills** at the top left show names, icons, and connection dots, respecting
@@ -81,9 +90,22 @@ clear cached artwork and reload it without changing your preferences.
 
 | TV        | Model identifier | Takeover Support |
 | --------- | ---------------- | ---------------- |
+| LG B1     | `OLED65B19LA`    | ✅               |
 | LG C1     | `OLED48C1KNB`    | ✅               |
 | LG G1     | `OLED65G1RLA`    | ✅               |
 | LG UP8000 | `86UP80009LA`    | Unknown          |
+
+</details>
+
+<details>
+<summary>webOS 22</summary>
+
+| TV        | Model identifier | Takeover Support                                           |
+| --------- | ---------------- | ---------------------------------------------------------- |
+| LG UQ801C | `55UQ801C0SB`    | ✅ Executable method; firmware 04.60.90, internal 7.6.0-19 |
+
+This is one owner-tested configuration, not a claim that every webOS 22 model has the same Home.
+The native executable path and lifecycle-v2 manifest are checked before enabling takeover.
 
 </details>
 
@@ -151,7 +173,7 @@ to help make Luma available by default.
 On your computer, replace `TV_IP`:
 
 ```sh
-scp -O dist/com.ecklf.luma_3.0.1_arm.ipk root@TV_IP:/tmp/luma.ipk
+scp -O dist/com.ecklf.luma_3.2.1_arm.ipk root@TV_IP:/tmp/luma.ipk
 ssh root@TV_IP
 ```
 
@@ -167,8 +189,9 @@ luna-send -i luna://com.webos.appInstallService/dev/install \
 ### Takeover Method
 
 > [!NOTE]
-> Takeover is supported on **webOS 5, 6, 24, 25 and 26**.\
-> On 5, 6 and 24 it replaces the Home executable; on 25 and 26 it mounts Luma's Home app.\
+> Takeover is supported on **webOS 5, 6, 22, 24, 25 and 26**.\
+> On 5, 6, 22 and 24 it replaces the Home executable; on 25 and 26 it mounts Luma's Home app.\
+> webOS 22 requires the native LG Home executable with lifecycle interface v2; other layouts are rejected.
 > The takeover does not delete LG Home: it remains underneath a temporary mount, which is cleared by
 > a reboot. If Luma is uninstalled first, LG Home returns on reboot, but the separate takeover boot
 > hook remains and logs an error because it can no longer find Luma. No TV reset is needed. For
@@ -205,9 +228,9 @@ Boot log: `/var/lib/luma-home/boot.log`. See the
 [development guide](development.md#optional-native-home-integration) for implementation details.
 
 <details>
-<summary>Method for webOS 5 / 6 / 24</summary>
+<summary>Method for webOS 5 / 6 / 22 / 24</summary>
 
-On **webOS 5, 6 and 24**, SAM cannot reread a mounted Home manifest, so `home.sh enable` instead
+On **webOS 5, 6, 22 and 24**, `home.sh enable` uses the executable method instead of replacing the manifest. It
 bind-mounts Luma's executable over LG's `/usr/bin/com.webos.app.home`. LG's Home manifest stays
 in place and Luma registers with SAM itself, so the Home key brings the running Luma back instead
 of restarting it. The commands and the cold-boot hook are the same.
@@ -297,9 +320,17 @@ using label detection), **HDMI**, **USB**, **Apple TV**, **Computer**, **Console
 An explicit icon choice is saved separately for each input and persists across restarts.
 Choose **Automatic** to clear that input's override and restore label-based icon detection.
 
+### Channels
+
+Open **Settings → Widgets → Channels** and toggle tuner channels On to pin them to the Home
+channels strip (up to 40). Order follows the order you enable them. Focus a tile for the
+now-playing title when the guide has it; **OK** tunes that channel. Logos come from the TV's
+channel logo store when LG provides them.
+
 ### Recent app switching
 
-Press **Back** on Home, or hold **Back** for 0.6 seconds from any page, to open Recent apps.
+Hold **Back** for 0.6 seconds from any page to open Recent apps. A short press never opens it,
+including on Home.
 
 - **Left / Right**, the pointer, or the scroll wheel browses recent apps and inputs.
 - **OK** or a pointer click opens the selected app or input.
@@ -334,7 +365,7 @@ checksum-pinned SDL-webOS library; both downloads are cached under `.build/`.
 Output:
 
 ```text
-dist/com.ecklf.luma_3.0.1_arm.ipk
+dist/com.ecklf.luma_3.2.1_arm.ipk
 dist/sha256sums
 dist/repo.json
 dist/app-icon-large.png

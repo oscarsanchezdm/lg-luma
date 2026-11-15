@@ -372,10 +372,10 @@ fn effects(
                     if platform.webos {
                         state.launching = true;
                         state.notify(state.preferences.language.t("opening"));
-                        platform.send(Request::OpenChannel(id));
-                        // When Luma is Home, openChannel alone can leave the launcher
-                        // in front; bring Live TV up after the tune request.
+                        // Live TV first so a slow elevated tune cannot leave Home
+                        // in front; guide refresh runs off the launch worker.
                         platform.send(Request::Launch("com.webos.app.livetv".into()));
+                        platform.send(Request::OpenChannel(id));
                     } else {
                         let title = state
                             .inventory

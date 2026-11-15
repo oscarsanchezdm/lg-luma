@@ -285,11 +285,21 @@ impl Platform {
                     } else {
                         Ok(desktop_inventory.inputs.clone())
                     }),
-                    Request::RefreshChannelGuide(ids) => Response::ChannelGuide(if webos {
-                        channel_guide(&ids)
-                    } else {
-                        Ok(demo_channel_guide(&desktop_inventory.channels, &ids))
-                    }),
+                    Request::RefreshChannelGuide(ids) => {
+                        // Guide uses elevated apiadapter calls; keep it off the
+                        // launch worker so tuning is not queued behind now-playing.
+                        let responses = responses.clone();
+                        let demo = desktop_inventory.channels.clone();
+                        thread::spawn(move || {
+                            let result = if webos {
+                                channel_guide(&ids)
+                            } else {
+                                Ok(demo_channel_guide(&demo, &ids))
+                            };
+                            let _ = responses.send(Response::ChannelGuide(result));
+                        });
+                        continue;
+                    }
                     Request::OpenChannel(id) => {
                         let result = if webos { open_channel(&id) } else { Ok(()) };
                         Response::Launched { id, result }

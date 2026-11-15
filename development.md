@@ -72,6 +72,29 @@ backend. Avoid copying the whole SDK library directory or the TV's graphics driv
 
 ## Controls and navigation
 
+### Startup profiling
+
+See [startup measurements](docs/startup.md) for the Liquid Glass startup regression and
+the benchmark procedure. `xvfb-run -a pnpm benchmark:startup` builds a release desktop
+binary and alternates five process starts with runtime-filtered and precomputed glass.
+It records `.build/startup-benchmark.json`, without contacting TV or public HTTP services.
+Use `LUMA_STARTUP_RUNS=10` to change the sample count. These are process starts with warm
+filesystem/driver caches, not TV cold-boot measurements.
+
+`--diagnostics PATH` includes `startup.stages_ms` and `startup.first_frame`, separate from
+steady-state frame pacing. The glass counters distinguish prepared atlas loads from legacy
+runtime filtering. TV startup logs also report this breakdown after the first presentation.
+Inventory completion and the first successfully populated frame are timed separately, so a
+quick loading frame cannot conceal slow TV inventory responses.
+`LUMA_GLASS_PRECOMPUTED=0` forces the original filtering path for diagnostic comparison.
+
+`pnpm assets` prepares lossless `wallpapers/*.glass.png` atlases from the final 1080p JPEGs,
+including unshaded variants. The host and legacy renderer share the exact Rust resize/blur
+implementation. New uploads prepare both atlases on the wallpaper worker before publishing
+the immutable directory. Older uploads or missing/corrupt atlases fall back to the original
+renderer. Shader sampling, glass appearance, GPU cache budgets and lazy text are unchanged.
+`xvfb-run -a pnpm test:startup` verifies desktop GL/GLES framebuffer equality and fallback.
+
 ### Documentation screenshots
 
 `pnpm screenshots` generates `docs/home.png`, `docs/apps.png`, `docs/settings.png` and
@@ -86,6 +109,72 @@ It does not execute the test suites. A desktop display is required; on headless 
 `xvfb-run -a pnpm screenshots`. These images document the native design, not TV hardware behavior.
 
 ### Input
+
+General → UI sounds stores `ui_sounds` (default `false`, also for existing preferences).
+The SDL queue opens lazily on the first audible interaction, plays short original synthesized
+navigation/select/back cues at a fixed quiet level, and closes when disabled or the window loses
+focus/visibility. Navigation repeats are rate-limited and queued audio cannot accumulate.
+Unchanged navigation, worker responses, redraws, and scripted captures stay silent. Audio errors
+are logged once per enabled session and never prevent navigation; toggling off/on retries.
+No sound recordings or extra audio libraries are packaged. TV routing/volume and behavior alongside
+other apps need manual hardware verification. A desktop-only backend check is available with
+`SDL_AUDIODRIVER=dummy cargo test --locked --bin luma dummy_audio_ -- --ignored --test-threads=1`.
+The unavailable-backend check runs with
+`SDL_AUDIODRIVER=luma-unavailable cargo test --locked --bin luma unavailable_audio_ -- --ignored --test-threads=1`.
+
+Weather → Widget style persists `weather_style` (`standard`, the default, `no_icon`,
+or `compact`). Home and Settings use the same native layout and painting functions.
+The picker shows all three designs with offline sample weather, in the saved
+temperature unit. Browsing does not change preferences or fetch a forecast. OK/click
+saves a style and returns to Weather, while Back/Left cancels without changing the style.
+The no-icon layout reclaims the icon column. Compact uses two lines, with a small icon,
+condition and location on the second. Cached-reading warnings and setup/error states
+remain visible. `xvfb-run -a pnpm screenshots --weather-styles` captures all designs and
+the settings preview using the native renderer and loopback-only cached sample weather.
+
+General → App sorting stores `app_sorting` (`alphabetical`, the default, or `usage`).
+`app_launch_counts` maps app IDs to saturating launch counts, saved after successful TV
+launch responses, including Recent apps. Failed launches, desktop simulations, inputs,
+and webhook shortcuts do not count. Counting continues in Alphabetically mode. Non-favorites sort
+by descending count in usage mode, then case-insensitive title and app ID. Favorites
+retain their manual order. The same order fills empty dock slots and the app drawer.
+`xvfb-run -a pnpm screenshots --sorting` captures the sorting settings, both app orders,
+and the generic disc input icon from the native desktop renderer using seeded local counts.
+
+Home uses a 6×4 placement grid in logical 1920×1080 space above the unchanged six-app dock.
+Greeting combines weekday/date and greeting in 4 columns × 1 row; Weather spans 2 columns × 2 rows.
+Greeting uses 90.4px text with 1.05 leading and an 18.4px date in a 32.8px band,
+keeping both lines inside the 128px-tall row; long translations fit to the available width.
+Their anchors persist as `greeting_position` and `weather_position` (`column`, `row`, zero-based).
+Defaults are Greeting (0,0), Weather (4,0). The separate-Date draft's untouched defaults migrate
+to this arrangement only when a legacy `date_position` field is present; it is omitted on save.
+Custom Greeting/Weather anchors are preserved, including new layouts matching that old arrangement.
+Sanitization repairs out-of-bounds anchors and overlaps deterministically.
+Settings → Widgets opens the scaled Home grid by default. Each occupied cell opens an app-style
+Configure/Move/Remove popup. A fixed, right-aligned toolbar above the preview contains Reset to defaults on the
+left and Add widget on the right, using the Backgrounds pill style. Empty cells also open the
+Add catalog directly; it excludes installed widgets. Reset restores the default membership and
+positions, preserving date/weather configuration and the app dock; an already-default reset does not save.
+The preview shows only widget placements over the wallpaper, without a gray dock placeholder.
+Shortcuts uses a fixed pill at the top left of the preview toolbar. Inputs is a separate sidebar section directly
+below Apps, not a widget. Its list and individual input/icon settings retain focus on return.
+The input icon picker includes Steam. Automatic detection recognizes the word Steam in labels such
+as Steam Deck, Steam Link and Steam Machine, ahead of generic computer/streaming-device fallbacks.
+Move and Add open a placement preview; arrows browse
+all twenty-four anchors, OK/click saves a valid placement, and Back cancels without changing preferences.
+Invalid positions are red and cannot be committed. Removing a widget frees its cells while keeping
+its settings. Adding is atomic: browsing/cancelling placement does not install or save a widget.
+The legacy `show_greeting` and `show_weather` fields now store whether each widget is installed;
+old hidden widgets start removed. Configuration menus have no widget visibility or position rows.
+`show_date` optionally hides the combined Greeting's date line. Removed Weather never requests forecasts.
+Greeting settings contain the date toggle and format picker, with no separate Date widget or position.
+The date uses 18.4px/600/+0.12 tracking at 72% opacity; Greeting uses
+90.4px/500/−0.065 tracking and 1.05 leading, fitting shorter for long translations.
+The 32.8px date band keeps both lines inside one grid row.
+Weather content is top-aligned within its 2×2 footprint in every style.
+Greeting has no name editor; legacy `greeting_name` fields are ignored and not serialized.
+All three weather styles reflow inside the same fixed footprint. `pnpm screenshots --widgets`
+captures the default arrangement, an alternate arrangement, the grid manager, actions and Add catalog.
 
 | Input                         | Action                                                                       |
 | ----------------------------- | ---------------------------------------------------------------------------- |
@@ -144,15 +233,15 @@ instead of once per minute. Existing saved hour and seconds preferences are reta
 App cards on Home, in the drawer, and in Settings → Apps are artwork-only, with no name captions
 or App names setting. Legacy `show_names`, `show_home_names`, and `show_app_names` preferences
 are ignored and are not written back. App titles remain available in the management popup.
-**Settings → Widgets** groups **Weather**, **Shortcuts**, and **Inputs** as separate subpages.
-Weather location and temperature choices return to Weather; Back from a widget returns to its row
-in Widgets. Input visibility/naming choices return to Inputs, then its Widgets row.
+**Settings → Widgets** opens the placement manager. Select Weather and choose Configure for its
+settings; **Shortcuts** has a pill at the top left. **Settings → Inputs** is directly below Apps
+in the sidebar. Weather location and temperature choices return to Weather; Back from a widget
+returns to its grid cell. Input visibility/naming choices return to the Inputs list, then its sidebar entry.
 Existing greeting, weather, shortcut and input preferences are unchanged. Scrollable Settings lists
 reserve 64 logical pixels below their last item for both remote focus and wheel scrolling,
 with a tighter 48-pixel spacing for Languages and Backgrounds.
-The Home greeting and standalone date, along with their widget entries, are removed. Their legacy
-preferences remain readable and are not erased during other edits. Weather occupies the former
-greeting area with a large condition icon, temperature, condition and location. The colored, static
+The weekday/date is part of the combined Greeting, not a standalone widget. Weather uses its
+own fixed footprint with a large condition icon, temperature, condition and location. The colored, static
 icons are original Breezy Weather PNGs, including clear/partly-cloudy night variants, bundled locally
 with their LGPL-3.0 license, attribution and source hashes in `assets/weather/`. No icons are fetched at runtime.
 Disabled weather
@@ -160,8 +249,11 @@ is hidden. Enabled weather without a location uses the same large 144px artwork 
 Settings lists render behind fixed controls. The drawer grid is clipped below its fixed dock so
 offscreen cards cannot capture pointer events there. Input name removal uses **Clear name**.
 Choice checkmarks identify saved values, while the bright row fill identifies only the current focus.
+Input connection dots are amber when a connected cable explicitly reports no signal, green for
+other connected inputs, and gray for disconnected or unknown cable states. An unknown signal
+report alone does not imply no signal, and signal reports never override cable-based visibility.
 
-Input icon picker: **Settings → Widgets → Inputs → select input → Icon** opens a
+Input icon picker: **Settings → Inputs → select input → Icon** opens a
 native picker for bundled input SVG icons. Its choices are **Automatic** (default label detection),
 **HDMI**, **USB**, **Apple TV**, **Computer**, **Console**, **PlayStation**, **NVIDIA Shield**,
 **Streaming device**, **Nintendo Switch**, **Nintendo Switch 2**, **Sony**, **DVD**, **Blu-ray**,
@@ -175,6 +267,8 @@ using Automatic. This is a backward-compatible feature and does not change input
 
 Home favorites form one horizontal glass dock, never a second row. Left/Right follows saved order,
 including reorder mode, and reveals complete cards. Up reaches Inputs or the clock/settings control.
+Up from the drawer’s first app row dismisses the drawer immediately while preserving the
+corresponding dock app as the selected Home favorite. Up within later grid rows stays in the drawer.
 Down lifts the dock to the top and reveals a six-column app grid beneath it. Favorites stay in the
 dock instead of appearing twice in the grid. The drawer has no search or category toolbar.
 The Home dock follows saved pinned order, with no Apps button or Move apps label above it.
@@ -213,6 +307,12 @@ an FBO or sampling the framebuffer. Text and app artwork are separate, sharp dra
 crossfades blend both glass backdrops. Wallpaper changes already invalidate the full scene, while
 ordinary glass changes participate in damage tracking.
 
+Modal cards (wallpaper upload, shortcut editing, app/background actions, deletion confirmations,
+and the keyboard) use opaque gray gradients rather than wallpaper-sampling glass to keep their
+content readable. The dock and regular controls retain their glass treatment.
+Wallpaper-upload and shortcut-editor panels use the same solid dark gray as the QR quiet zone
+and logo plate, avoiding a contrasting square behind the QR code without reducing its contrast.
+
 See [the research notes](docs/liquid-glass-research.md) for sources, visual decisions and limitations.
 
 For bounded GLES2 cost, refraction samples the wallpaper, not other UI controls behind a menu.
@@ -242,9 +342,10 @@ System text events update app/location queries; Done/Back stops editing and rest
 
 ### Recent apps
 
-Press Back on Home to open Recent apps, or hold Back (Escape on desktop) for 600 ms from any page.
-Short Back navigates on release. Back in an overlay, the system keyboard or
-move mode keeps its immediate dismissal behavior; Backspace keeps its editing/navigation role.
+Hold Back (Escape on desktop) for 600 ms from any page to open Recent apps.
+Short Back navigates on release and does nothing on Home; it never opens Recent apps.
+Back in an overlay, the system keyboard or move mode keeps its immediate dismissal behavior;
+Backspace keeps its editing/navigation role.
 Losing window focus cancels an unfinished hold. This is an app-local shortcut while Luma is focused.
 SDL-webOS Back (scancode 482) and long-Back Exit (505) are normalized before rust-sdl2 decodes the
 event, since the native keymap can leave their keycodes unset and the Rust scancode enum does not

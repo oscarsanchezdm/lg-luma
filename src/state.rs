@@ -567,8 +567,12 @@ impl State {
                 && (self.channel_switcher.visibility
                     != if self.channel_switcher_open() { 1. } else { 0. }
                     || self.channel_switcher.cards_animating(self.pointer)))
+            // Only while visibility/crossfade is in flight. A steady Top Shelf
+            // reveal must not keep the event loop at timeout 0 (busy-spin).
             || (self.shelf.visibility > 0. && self.shelf.visibility < 1.)
-            || self.shelf.revealed
+            || (self.shelf.revealed
+                && self.shelf.display_app.is_some()
+                && self.shelf.crossfade < 1.)
             || self.previous_background.is_some()
             || self.panel_started.is_some()
             || (!self.preferences.reduced_motion

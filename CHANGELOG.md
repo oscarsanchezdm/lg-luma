@@ -1,5 +1,48 @@
 # lg-luma
 
+## 3.3.0
+
+### Minor Changes
+
+- 6b80570: Add a grid-first Home widget manager with app-style Configure, Move and Remove menus, plus Reset to defaults and Add widget pills above the grid. The six-column, four-row grid mirrors the six-app favorites row. Greeting combines weekday/date and a time-based greeting in four columns and one row, with the original 90.4px greeting and 18.4px date typography; Weather spans two columns and two rows with top-aligned content. By default Greeting sits at the top left and Weather at the top right, spanning the first two rows. Valid saved custom placements are preserved. Preview fixed-size placements with the remote or pointer and reject overlaps or out-of-bounds positions. Removing frees cells while retaining configuration, and adding only saves after confirming placement. Reset restores default widgets and positions without clearing their settings. Configuration no longer has show/hide widget switches. Inputs moves to its own sidebar section below Apps and is not a widget. The app dock is unchanged; date visibility/format remain inside Greeting settings, without a separate Date widget or configurable name.
+
+  Keep the full weather-setup action readable in every language by wrapping long translations inside the fixed-size widget instead of truncating them.
+
+  Preserve the original weather temperature typography and tight spacing instead of shrinking the temperature independently of its layout.
+
+  Show the city before the weather status in Compact style, after the weather icon.
+
+### Patch Changes
+
+- a2acb54: Require holding Back to open Recent apps on every page, including Home. Short presses keep their navigation and dismissal behavior without opening the switcher.
+
+## 3.2.1
+
+### Patch Changes
+
+- 6d96a1b: Darken wallpaper-upload and shortcut-editor modals to match their QR code backgrounds, removing the visible square while preserving QR contrast and quiet zones.
+- 792782c: Fix the UI sounds icon rendering black and show amber input badges when a connected input explicitly reports no signal. Disconnected or unknown connections stay gray, and connected inputs without a no-signal report stay green.
+
+## 3.2.0
+
+### Minor Changes
+
+- e5eb588: Add optional tvOS-inspired UI feedback sounds for navigation, selection, and Back, with a General setting that defaults to off. Sounds are originally synthesized and gracefully fall back to silence if audio is unavailable.
+
+### Patch Changes
+
+- 21e5199: Dismiss the app drawer when remote selection moves up to the favorites row, keeping the corresponding favorite selected on Home.
+- 88f6431: Restore opaque gray backgrounds for upload and shortcut dialogs, action cards, delete confirmations, and the keyboard instead of Liquid Glass.
+- db61888: Precompute lossless Liquid Glass wallpaper backdrops during asset preparation and uploads instead of decoding, resizing and blurring them before the first frame. Add startup diagnostics and regression coverage while preserving legacy wallpaper fallback.
+- 91a25bc: Hide input connection badges left behind by mouse hover when remote navigation moves focus away.
+
+## 3.1.0
+
+### Minor Changes
+
+- 6037963: Add Standard, No icon and Compact weather widget styles with native-rendered sample previews in Settings.
+- 9b36e99: Add configurable A–Z or usage-based app sorting with persistent local launch counts, preserving favorite order. Replace the Compact Disc wordmark with a generic disc icon.
+
 ## 3.0.1
 
 ### Patch Changes

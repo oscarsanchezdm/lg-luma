@@ -78,7 +78,10 @@ fn cycling_button_toggles_on_off_without_opening_a_page_or_moving_controls() {
         state.preferences.language = language;
         let before = controls(&state);
         assert!(scene(&state).draw.iter().any(|draw| matches!(draw, Draw::TintedImage(path, ..) if path.ends_with("ui-icons/refresh-off.lvec"))));
-        assert_eq!(state.activate(), vec![Effect::Save]);
+        assert_eq!(
+            state.activate(),
+            vec![Effect::Save, Effect::PruneWallpaperPacks]
+        );
         assert!(state.preferences.wallpaper_cycle);
         assert!(state.preferences.wallpaper_changed > 0);
         assert!(state.subpage.is_none());
@@ -131,7 +134,10 @@ fn cycling_button_toggles_on_off_without_opening_a_page_or_moving_controls() {
                 (new.rect.x, new.rect.y, new.rect.w, new.rect.h)
             );
         }
-        assert_eq!(state.activate(), vec![Effect::Save]);
+        assert_eq!(
+            state.activate(),
+            vec![Effect::Save, Effect::PruneWallpaperPacks]
+        );
         assert!(!state.preferences.wallpaper_cycle);
     }
 }
@@ -155,7 +161,7 @@ fn gradient_toggle_is_saved_stable_and_switches_bundled_and_uploaded_images() {
         assert!(state.overlay.is_none() && state.subpage.is_none());
         let rendered = scene(&state);
         assert!(
-            matches!(&rendered.draw[0], Draw::Image(path, ..) if path.ends_with("dunes-plain.jpg"))
+            matches!(&rendered.draw[0], Draw::Image(path, ..) if path.ends_with("slate-plain.jpg"))
         );
         for (old, new) in before.iter().zip(&rendered.controls) {
             assert_eq!(old.target, new.target);
@@ -169,7 +175,7 @@ fn gradient_toggle_is_saved_stable_and_switches_bundled_and_uploaded_images() {
         assert!(!restored.wallpaper_gradient);
         assert_eq!(state.activate(), vec![Effect::Save]);
         assert!(
-            matches!(&scene(&state).draw[0], Draw::Image(path, ..) if path.ends_with("dunes.jpg"))
+            matches!(&scene(&state).draw[0], Draw::Image(path, ..) if path.ends_with("slate.jpg"))
         );
     }
     state.direction(Direction::Down, &controls(&state));
@@ -209,9 +215,8 @@ fn cycling_uses_all_uploaded_ids_but_not_deleted_or_pending_deletion_entries() {
     assert!(state.cycle_wallpaper(300));
     assert_eq!(state.preferences.background, first.id);
     state.preferences.background = "dunes".into();
-    state.preferences.deleted_backgrounds = vec!["san-francisco".into()];
     assert!(state.cycle_wallpaper(400));
-    assert_eq!(state.preferences.background, "summit");
+    assert_eq!(state.preferences.background, "san-francisco");
 }
 
 #[test]
@@ -243,7 +248,10 @@ fn automatic_changes_preserve_manual_splash_across_saves_and_restart_and_manual_
     restored.section = 1;
     restored.focus = Target::Background(0);
     restored.activate();
-    assert_eq!(restored.activate(), vec![Effect::Save]);
+    assert_eq!(
+        restored.activate(),
+        vec![Effect::Save, Effect::PruneWallpaperPacks]
+    );
     assert_eq!(restored.preferences.background, "slate");
     assert_eq!(restored.preferences.splash_background(), "slate");
     assert_eq!(restored.background_fade, crate::state::BACKGROUND_FADE);
@@ -496,7 +504,7 @@ fn scrolled_backgrounds_cannot_capture_upload_or_sidebar_pointer_hits() {
     );
     assert_eq!(state.hit_test(&gallery, 1000., 200.), None);
     assert_eq!(
-        state.hit_test(&gallery, 300., 364.),
+        state.hit_test(&gallery, 300., 448.),
         Some(Target::Sidebar(1))
     );
     assert_eq!(
@@ -566,7 +574,7 @@ fn upload_discovery_does_not_apply_and_custom_selection_uses_immutable_paths() {
     state.section = 1;
     let item = custom(1);
     state.set_wallpapers(vec![item.clone()]);
-    assert_eq!(state.preferences.background, "dunes");
+    assert_eq!(state.preferences.background, "slate");
     let gallery = scene(&state);
     assert!(
         gallery
@@ -577,7 +585,10 @@ fn upload_discovery_does_not_apply_and_custom_selection_uses_immutable_paths() {
     state.focus = Target::Background(BACKGROUNDS.len());
     assert!(state.activate().is_empty());
     assert_eq!(state.focus, Target::UseBackground);
-    assert_eq!(state.activate(), vec![Effect::Save]);
+    assert_eq!(
+        state.activate(),
+        vec![Effect::Save, Effect::PruneWallpaperPacks]
+    );
     assert_eq!(state.preferences.background, item.id);
     assert!(
         scene(&state)
@@ -594,7 +605,7 @@ fn upload_discovery_does_not_apply_and_custom_selection_uses_immutable_paths() {
     assert_eq!(restored.preferences.background, item.id);
     // Missing uploads fall back without overwriting the saved selection.
     assert!(
-        matches!(&scene(&restored).draw[0], Draw::Image(path, ..) if path.ends_with("wallpapers/dunes.jpg"))
+        matches!(&scene(&restored).draw[0], Draw::Image(path, ..) if path.ends_with("wallpapers/slate.jpg"))
     );
     restored.set_wallpapers(vec![item.clone()]);
     assert!(matches!(&scene(&restored).draw[0], Draw::Image(path, ..) if path == &item.image()));
@@ -630,7 +641,12 @@ fn background_popup_is_modal_lifts_the_same_thumbnail_and_restores_its_parent() 
     let mut state = ready();
     state.open(2);
     state.section = 1;
-    state.focus = Target::Background(0);
+    let lake = custom(1);
+    state.set_wallpapers(vec![lake.clone()]);
+    let index = (0..state.background_count())
+        .find(|&i| state.background_id(i) == Some(lake.id.as_str()))
+        .unwrap();
+    state.focus = Target::Background(index);
     let before = controls(&state)
         .into_iter()
         .find(|c| c.target == state.focus)
@@ -664,7 +680,7 @@ fn background_popup_is_modal_lifts_the_same_thumbnail_and_restores_its_parent() 
     state.activate();
     assert_eq!(state.focus, Target::DeleteBackground);
     state.back();
-    assert_eq!(state.focus, Target::Background(0));
+    assert_eq!(state.focus, Target::Background(index));
     assert!(state.overlay.is_none());
 }
 
@@ -698,34 +714,80 @@ fn selected_background_has_no_delete_action_and_rejects_forced_confirmation() {
 }
 
 #[test]
-fn every_unselected_bundled_background_can_be_removed_and_stays_removed_after_reload() {
+fn bundled_and_undownloaded_photo_packs_cannot_be_deleted_from_the_gallery() {
     let mut state = ready();
     state.open(2);
     state.section = 1;
-    for (id, _) in BACKGROUNDS {
-        if *id == state.preferences.background {
-            continue;
-        }
+    for id in ["midnight", "dunes", "yosemite"] {
+        assert!(
+            !state.can_delete_background(id),
+            "{id} stays in the gallery without a delete action"
+        );
         let index = (0..state.background_count())
             .find(|&i| state.background_id(i) == Some(id))
             .unwrap();
         state.focus = Target::Background(index);
-        state.activate();
-        state.focus = Target::DeleteBackground;
-        state.activate();
-        state.focus = Target::ConfirmDelete;
-        assert_eq!(state.activate(), vec![Effect::Save]);
-        assert!(state.overlay.is_none());
-        assert!(!(0..state.background_count()).any(|i| state.background_id(i) == Some(id)));
-        assert!(controls(&state).iter().any(|c| c.target == state.focus));
+        state.options();
+        assert!(
+            !controls(&state)
+                .iter()
+                .any(|control| control.target == Target::DeleteBackground),
+            "{id} must not offer delete"
+        );
+        state.back();
     }
-    assert_eq!(state.background_count(), 1);
-    let mut preferences: crate::model::Preferences =
-        serde_json::from_slice(&serde_json::to_vec(&state.preferences).unwrap()).unwrap();
-    preferences.sanitize();
-    let restored = State::new(preferences);
-    assert_eq!(restored.background_count(), 1);
-    assert_eq!(restored.background_id(0), Some("dunes"));
+    assert!(
+        (0..state.background_count()).any(|i| state.background_id(i) == Some("dunes")),
+        "Monument Valley stays listed before download"
+    );
+}
+
+#[test]
+fn deleting_a_downloaded_photo_pack_keeps_it_listed_without_delete_until_fetched_again() {
+    let mut state = ready();
+    state.open(2);
+    state.section = 1;
+    let id = "yosemite";
+    let cache = std::env::temp_dir().join(format!(
+        "luma-wallpaper-delete-{}-{}",
+        std::process::id(),
+        crate::state::unix_now()
+    ));
+    state.wallpaper_pack_cache = cache.clone();
+    let pack = cache.join(id);
+    std::fs::create_dir_all(&pack).unwrap();
+    for name in [
+        format!("{id}.jpg"),
+        format!("{id}-plain.jpg"),
+        format!("{id}.glass.png"),
+        format!("{id}-plain.glass.png"),
+    ] {
+        std::fs::write(pack.join(name), b"x").unwrap();
+    }
+    assert!(state.wallpaper_downloaded(id));
+    assert!(state.can_delete_background(id));
+    let index = (0..state.background_count())
+        .find(|&i| state.background_id(i) == Some(id))
+        .unwrap();
+    state.focus = Target::Background(index);
+    state.activate();
+    state.focus = Target::DeleteBackground;
+    state.activate();
+    state.focus = Target::ConfirmDelete;
+    assert_eq!(
+        state.activate(),
+        vec![Effect::Save, Effect::PruneWallpaperPacks]
+    );
+    assert!(state.preferences.deleted_backgrounds.is_empty());
+    assert!(
+        (0..state.background_count()).any(|i| state.background_id(i) == Some(id)),
+        "photo packs stay listed so they can be fetched again"
+    );
+    // Until prune runs on the worker, files may still exist; after remove they
+    // must not offer delete.
+    let _ = std::fs::remove_dir_all(&cache);
+    assert!(!state.wallpaper_downloaded(id));
+    assert!(!state.can_delete_background(id));
 }
 
 #[test]
@@ -760,7 +822,7 @@ fn uploaded_deletion_is_single_flight_handles_failures_and_keeps_unrelated_focus
     state.back();
     state.focus = Target::UseBackground;
     assert!(state.activate().is_empty()); // Cannot apply an image being deleted.
-    assert_eq!(state.preferences.background, "dunes");
+    assert_eq!(state.preferences.background, "slate");
     state.back();
     state.focus = Target::Background(BACKGROUNDS.len() + 1);
     state.wallpaper_deleted(lake.id, Ok(()));
@@ -777,14 +839,16 @@ fn filtered_bundled_entries_do_not_misidentify_custom_thumbnails_or_popup_parent
     let mut state = ready();
     state.open(2);
     state.section = 1;
+    // Legacy hide lists must not drop built-ins from the gallery.
     state.preferences.deleted_backgrounds = BACKGROUNDS
         .iter()
-        .filter(|(id, _)| *id != "dunes")
+        .filter(|(id, _)| *id != "slate")
         .map(|(id, _)| (*id).into())
         .collect();
     let lake = custom(1);
     state.set_wallpapers(vec![lake.clone()]);
-    state.focus = Target::Background(1);
+    let custom_index = BACKGROUNDS.len();
+    state.focus = Target::Background(custom_index);
     assert!(
         scene(&state)
             .draw
@@ -794,9 +858,12 @@ fn filtered_bundled_entries_do_not_misidentify_custom_thumbnails_or_popup_parent
     state.options();
     state.set_wallpapers(vec![custom(2), lake.clone()]);
     state.back();
-    assert_eq!(state.focus, Target::Background(2));
+    assert_eq!(state.focus, Target::Background(custom_index + 1));
     state.options();
-    assert_eq!(state.activate(), vec![Effect::Save]);
+    assert_eq!(
+        state.activate(),
+        vec![Effect::Save, Effect::PruneWallpaperPacks]
+    );
     assert_eq!(state.preferences.background, lake.id);
 }
 
@@ -814,16 +881,9 @@ fn removed_popup_entry_closes_safely_and_preference_sanitizing_protects_the_sele
     state.preferences.deleted_backgrounds = vec![
         "dunes".into(),
         "../bad".into(),
-        "forest".into(),
-        "forest".into(),
+        "midnight".into(),
+        "prism".into(),
     ];
     state.preferences.sanitize();
-    assert!(
-        !state
-            .preferences
-            .deleted_backgrounds
-            .iter()
-            .any(|id| id == "dunes" || id == "../bad")
-    );
-    assert!(state.preferences.deleted_backgrounds.len() <= 1);
+    assert!(state.preferences.deleted_backgrounds.is_empty());
 }
